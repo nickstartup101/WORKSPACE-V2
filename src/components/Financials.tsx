@@ -1,1108 +1,1344 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { auth, db, storage, handleFirestoreError, OperationType } from '../firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../firebase';
 import { 
   collection, addDoc, onSnapshot, query, orderBy, 
-  deleteDoc, doc, setDoc, serverTimestamp 
+  deleteDoc, doc, updateDoc, serverTimestamp 
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import imageCompression from 'browser-image-compression';
-import { format, isSameMonth, parseISO } from 'date-fns';
-import { utils, writeFile } from 'xlsx';
 import { 
-  Upload, Receipt, PlusCircle, 
-  Download, Eye, EyeOff, X, Trash2, 
-  Sparkles, CheckCircle2, FileText, Wallet, CreditCard,
-  Building2, DollarSign, Calendar, Filter, PieChart,
-  Percent, ArrowUpRight, ArrowDownRight, Edit3, Check, Split,
-  AlertCircle, ShieldCheck
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer 
+} from 'recharts';
+import { 
+  Plus, Trash2, Edit3, Save, X, Search, Download, 
+  List, Check, Receipt, ShoppingBag, Layers, 
+  Image as ImageIcon, Upload, Eye, Wallet, CreditCard,
+  Building2, TrendingUp, Calendar, 
+  ArrowUpRight, ArrowDownRight, ShoppingCart,
+  Clock, Hash, HelpCircle
 } from 'lucide-react';
+import { format, isSameMonth, parseISO, subMonths, getDate, getDaysInMonth } from 'date-fns';
+import { utils, writeFile } from 'xlsx';
 import { useTranslation } from 'react-i18next';
+import { COMMON_RESOURCES } from '../constants';
 import ApprovalModal from './ApprovalModal';
-import PinModal from './PinModal';
 
-export type PaymentChannel = 'Cash' | 'Onepay' | 'LDB';
+// Supplier Code abbreviations
+const SUPPLIER_CODES: Record<string, string> = {
+  'CHANHOM': 'CH',
+  'LATDA': 'LD',
+  'HEAVENLY': 'HV',
+  'DMART': 'DM',
+  'MARRY ANN': 'MA',
+  'OTHER': 'OT'
+};
 
-export default function Financials({ appConfig, selectedBranch }: { appConfig: any, selectedBranch?: string }) {
+export type PaymentMethod = 'Cash' | 'Onepay' | 'LDB';
+export type ExpenseCategory = 'purchasing' | 'rental' | 'salary' | 'operation' | 'admin' | 'sales' | 'other';
+
+interface FormItemRow {
+  id: string;
+  productId: string;
+  productSearch: string;
+  unit: string;
+  priceMode: 'total' | 'per_pack';
+  priceOriginal: number;
+  displayPrice: string;
+  quantity: number;
+  quantityPerUnit: number;
+  remark: string;
+  isDropdownOpen?: boolean;
+}
+
+export default function Suppliers() {
   const { t, i18n } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [allTransactions, setAllTransactions] = useState<any[]>([]);
-  const [dailyTransactions, setDailyTransactions] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showPrivacy, setShowPrivacy] = useState(false);
-
-  // 🌟 IN-APP TOAST NOTIFICATION STATE (ບໍ່ໃຊ້ alert ຂອງ browser)
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => {
-      setToast(null);
-    }, 2500);
-  };
-
-  // Timeframe View Mode: 'month' vs 'all'
-  const [timeframeMode, setTimeframeMode] = useState<'month' | 'all'>('month');
-
-  // Date View State
-  const [viewDate, setViewDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-
-  // Form State
-  const [formData, setFormData] = useState({
-    type: 'expense' as 'income' | 'expense',
-    amount: 0,
-    category: 'Purchasing',
-    description: '',
-    source: 'Cash' as PaymentChannel,
-    receipt: null as File | null,
-    date: format(new Date(), 'yyyy-MM-dd'),
-    time: format(new Date(), 'HH:mm')
-  });
-
-  const [displayAmount, setDisplayAmount] = useState('');
-
-  // 3-Way Split Income States (Cash, Onepay, LDB)
-  const [is3WaySplit, setIs3WaySplit] = useState(true);
-  const [splitCash, setSplitCash] = useState<number>(0);
-  const [splitCashDisplay, setSplitCashDisplay] = useState<string>('');
-  const [splitOnepay, setSplitOnepay] = useState<number>(0);
-  const [splitOnepayDisplay, setSplitOnepayDisplay] = useState<string>('');
-  const [splitLDB, setSplitLDB] = useState<number>(0);
-  const [splitLDBDisplay, setSplitLDBDisplay] = useState<string>('');
-
-  const [isEditing, setIsEditing] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [oldTxData, setOldTxData] = useState<any>(null);
-  const [showEditPinModal, setShowEditPinModal] = useState(false);
-  const [txToEdit, setTxToEdit] = useState<any>(null);
-
-  const [txToDelete, setTxToDelete] = useState<any>(null);
-  const [showDeletePinModal, setShowDeletePinModal] = useState(false);
-
-  // Supplier Purchases Pull States
-  const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
-  const [pullDate, setPullDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [paymentDate, setPaymentDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [billPaymentSources, setBillPaymentSources] = useState<{ [id: string]: PaymentChannel }>({});
-  const [importingBillId, setImportingBillId] = useState<string | null>(null);
+  const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
+  const [selectedFilterDate, setSelectedFilterDate] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState('');
 
-  const normalizePaymentChannel = (src?: string): PaymentChannel => {
-    if (!src) return 'Cash';
-    const s = String(src).toLowerCase();
-    if (s.includes('ldb')) return 'LDB';
-    if (s.includes('onepay') || s.includes('online') || s.includes('bank') || s.includes('transfer')) return 'Onepay';
-    return 'Cash';
-  };
+  // Mode Switcher: 'batch' vs 'single'
+  const [entryMode, setEntryMode] = useState<'batch' | 'single'>('batch');
 
-  const formatWithCommas = (val: string | number) => {
-    const clean = String(val).replace(/,/g, '');
-    if (!clean || isNaN(Number(clean))) return '';
-    return Number(clean).toLocaleString();
-  };
+  // Product Manager States
+  const [showProductManager, setShowProductManager] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<any>(null);
+  const [editProductName, setEditProductName] = useState('');
+  const [editProductUnit, setEditProductUnit] = useState('');
+  const [editProductIsDurable, setEditProductIsDurable] = useState(false);
+  const [editProductBoxSize, setEditProductBoxSize] = useState<number>(12);
 
-  // Safe Auto-balance for Income Split
-  const handleTotalAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const rawValue = e.target.value.replace(/,/g, '');
-    if (rawValue === '' || !isNaN(Number(rawValue))) {
-      const num = Number(rawValue) || 0;
-      setDisplayAmount(formatWithCommas(rawValue));
-      setFormData(prev => ({ ...prev, amount: num }));
+  // Edit Modal State
+  const [editingPriceId, setEditingPriceId] = useState<string | null>(null);
+  const [editPriceData, setEditPriceData] = useState<any>(null);
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
-      if (formData.type === 'income' && is3WaySplit) {
-        const remaining = Math.max(0, num - splitCash - splitOnepay);
-        setSplitLDB(remaining);
-        setSplitLDBDisplay(remaining > 0 ? formatWithCommas(remaining) : '');
-      }
+  // Form States
+  const [billDate, setBillDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
+  const [billTime, setBillTime] = useState<string>(format(new Date(), 'HH:mm'));
+  const [supplier, setSupplier] = useState<string>('CHANHOM');
+  const [category, setCategory] = useState<ExpenseCategory>('purchasing');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Cash');
+  const [currency, setCurrency] = useState<string>('LAK');
+  const [exchangeRate, setExchangeRate] = useState<number>(1);
+  const [billImageBase64, setBillImageBase64] = useState<string>('');
+  const [billRemark, setBillRemark] = useState<string>('');
+  const [saveLoading, setSaveLoading] = useState(false);
+
+  // Items in active bill
+  const [billItems, setBillItems] = useState<FormItemRow[]>([
+    {
+      id: 'item-1',
+      productId: '',
+      productSearch: '',
+      unit: 'UNIT',
+      priceMode: 'total',
+      priceOriginal: 0,
+      displayPrice: '',
+      quantity: 1,
+      quantityPerUnit: 1,
+      remark: '',
+      isDropdownOpen: false
     }
-  };
+  ]);
 
-  const handleSplitCashChange = (valStr: string) => {
-    const clean = valStr.replace(/,/g, '');
-    if (clean === '' || !isNaN(Number(clean))) {
-      const val = Number(clean) || 0;
-      setSplitCash(val);
-      setSplitCashDisplay(formatWithCommas(clean));
-      const total = formData.amount || (val + splitOnepay + splitLDB);
-      const remaining = Math.max(0, total - val - splitOnepay);
-      setSplitLDB(remaining);
-      setSplitLDBDisplay(remaining > 0 ? formatWithCommas(remaining) : '');
-    }
-  };
-
-  const handleSplitOnepayChange = (valStr: string) => {
-    const clean = valStr.replace(/,/g, '');
-    if (clean === '' || !isNaN(Number(clean))) {
-      const val = Number(clean) || 0;
-      setSplitOnepay(val);
-      setSplitOnepayDisplay(formatWithCommas(clean));
-      const total = formData.amount || (splitCash + val + splitLDB);
-      const remaining = Math.max(0, total - splitCash - val);
-      setSplitLDB(remaining);
-      setSplitLDBDisplay(remaining > 0 ? formatWithCommas(remaining) : '');
-    }
-  };
-
-  const handleSplitLDBChange = (valStr: string) => {
-    const clean = valStr.replace(/,/g, '');
-    if (clean === '' || !isNaN(Number(clean))) {
-      const val = Number(clean) || 0;
-      setSplitLDB(val);
-      setSplitLDBDisplay(formatWithCommas(clean));
-      const sum = splitCash + splitOnepay + val;
-      if (sum > formData.amount) {
-        setFormData(prev => ({ ...prev, amount: sum }));
-        setDisplayAmount(formatWithCommas(sum));
-      }
-    }
-  };
+  // Approval Modal State
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [approvalType, setApprovalType] = useState<'create' | 'delete' | null>(null);
+  const [pendingAction, setPendingAction] = useState<any>(null);
 
   // Listen to Firestore
   useEffect(() => {
-    const qAll = query(collection(db, 'transactions'), orderBy('date', 'desc'));
-    const branchId = selectedBranch || 'branch_1';
-
-    const unsubscribeAll = onSnapshot(qAll, (snap) => {
-      const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      const branchFiltered = all.filter((tx: any) => (tx.branchId || 'branch_1') === branchId);
-      setAllTransactions(branchFiltered);
-
-      const daily = branchFiltered.filter((tx: any) => tx.date === viewDate);
-      daily.sort((a: any, b: any) => (b.time || '').localeCompare(a.time || ''));
-      setDailyTransactions(daily);
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'transactions');
-    });
-
-    const unsubPrices = onSnapshot(collection(db, 'supplierPrices'), (snap) => {
-      setSupplierPrices(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-
-    const unsubProducts = onSnapshot(collection(db, 'products'), (snap) => {
+    const qP = query(collection(db, 'products'), orderBy('name'));
+    const unsubscribeP = onSnapshot(qP, (snap) => {
       setProducts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'products'));
+
+    const qS = query(collection(db, 'supplierPrices'));
+    const unsubscribeS = onSnapshot(qS, (snap) => {
+      setSupplierPrices(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'supplierPrices'));
 
     return () => {
-      unsubscribeAll();
-      unsubPrices();
-      unsubProducts();
+      unsubscribeP();
+      unsubscribeS();
     };
-  }, [viewDate, selectedBranch]);
+  }, []);
 
-  useEffect(() => {
-    setPullDate(viewDate);
-    setPaymentDate(viewDate);
-  }, [viewDate]);
-
-  // Financial KPIs
-  const financialSummary = useMemo(() => {
-    const now = new Date();
-
-    const activeList = allTransactions.filter(tx => {
-      if (timeframeMode === 'all') return true;
-      if (!tx.date) return true;
-      try {
-        const d = parseISO(tx.date);
-        return isSameMonth(d, now);
-      } catch {
-        return true;
-      }
-    });
-
-    let totalRevenue = 0;
-    let totalPurchasing = 0;
-    let totalOPEX = 0;
-
-    let cashIncome = 0, cashExpense = 0;
-    let onepayIncome = 0, onepayExpense = 0;
-    let ldbIncome = 0, ldbExpense = 0;
-
-    activeList.forEach(tx => {
-      const amt = Number(tx.amount) || 0;
-      const ch = normalizePaymentChannel(tx.source);
-      const isIncome = tx.type === 'income' || String(tx.category || '').toLowerCase() === 'sales';
-
-      if (isIncome) {
-        totalRevenue += amt;
-        if (ch === 'Cash') cashIncome += amt;
-        else if (ch === 'Onepay') onepayIncome += amt;
-        else if (ch === 'LDB') ldbIncome += amt;
-      } else {
-        const cat = String(tx.category || '').toLowerCase();
-        const isPurchasing = cat.includes('purchas') || cat.includes('supply') || cat.includes('ຊື້');
-
-        if (isPurchasing) totalPurchasing += amt;
-        else totalOPEX += amt;
-
-        if (ch === 'Cash') cashExpense += amt;
-        else if (ch === 'Onepay') onepayExpense += amt;
-        else if (ch === 'LDB') ldbExpense += amt;
-      }
-    });
-
-    const totalExpenses = totalPurchasing + totalOPEX;
-    const grossProfit = totalRevenue - totalPurchasing;
-    const grossMarginPercent = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0;
-    const netProfit = totalRevenue - totalExpenses;
-    const estimatedROI = totalExpenses > 0 ? (netProfit / totalExpenses) * 100 : 0;
-
-    return {
-      totalRevenue,
-      totalPurchasing,
-      totalOPEX,
-      totalExpenses,
-      grossProfit,
-      grossMarginPercent,
-      netProfit,
-      estimatedROI,
-      cashIncome, cashExpense, cashNet: cashIncome - cashExpense,
-      onepayIncome, onepayExpense, onepayNet: onepayIncome - onepayExpense,
-      ldbIncome, ldbExpense, ldbNet: ldbIncome - ldbExpense,
-      totalNetLiquidity: (cashIncome - cashExpense) + (onepayIncome - onepayExpense) + (ldbIncome - ldbExpense)
-    };
-  }, [allTransactions, timeframeMode]);
-
-  // Identify Imported Bills
-  const importedSupplierPriceIds = useMemo(() => {
-    const ids = new Set<string>();
-    allTransactions.forEach((tx) => {
-      if (tx.supplierPriceIds && Array.isArray(tx.supplierPriceIds)) {
-        tx.supplierPriceIds.forEach((id: string) => ids.add(id));
-      }
-    });
-    return ids;
-  }, [allTransactions]);
-
-  // Group Bills
-  const supplierBillsForSelectedDate = useMemo(() => {
-    const selectedDatePrices = supplierPrices.filter(p => p.date === pullDate);
-
-    const isOther = (name: string) => {
-      const n = String(name || '').trim().toUpperCase();
-      return n === 'OTHER' || n === 'ອື່ນໆ' || n === '';
-    };
-
-    const nonOtherPrices = selectedDatePrices.filter(p => !isOther(p.supplier));
-    const otherPrices = selectedDatePrices.filter(p => isOther(p.supplier));
-
-    const groups: { [supplier: string]: any[] } = {};
-    nonOtherPrices.forEach(p => {
-      const sup = String(p.supplier || '').trim();
-      if (!groups[sup]) groups[sup] = [];
-      groups[sup].push(p);
-    });
-
-    const itemTotalLAK = (item: any): number => {
-      if (item.totalPriceLAK !== undefined) return Number(item.totalPriceLAK || 0);
-      return item.currency === 'LAK'
-        ? Number(item.priceOriginal || 0) * (Number(item.quantity) || 1)
-        : Number(item.priceOriginal || 0) * Number(item.exchangeRate || 1) * (Number(item.quantity) || 1);
-    };
-
-    const bills: any[] = [];
-
-    Object.keys(groups).forEach(supplierName => {
-      const items = groups[supplierName];
-      const importedItems = items.filter(it => importedSupplierPriceIds.has(it.id));
-      const pendingItems = items.filter(it => !importedSupplierPriceIds.has(it.id));
-
-      if (importedItems.length > 0) {
-        const totalPrice = importedItems.reduce((sum, item) => sum + itemTotalLAK(item), 0);
-        bills.push({
-          id: `grouped_${supplierName}_imported_${pullDate}`,
-          supplier: supplierName,
-          date: pullDate,
-          totalPrice,
-          items: importedItems,
-          isGrouped: true,
-          sourceIds: importedItems.map(it => it.id),
-          isImported: true,
-          billImageUrl: importedItems[0]?.billImageUrl || ''
-        });
-      }
-
-      if (pendingItems.length > 0) {
-        const totalPrice = pendingItems.reduce((sum, item) => sum + itemTotalLAK(item), 0);
-        bills.push({
-          id: `grouped_${supplierName}_pending_${pullDate}`,
-          supplier: supplierName,
-          date: pullDate,
-          totalPrice,
-          items: pendingItems,
-          isGrouped: true,
-          sourceIds: pendingItems.map(it => it.id),
-          isImported: false,
-          billImageUrl: pendingItems[0]?.billImageUrl || ''
-        });
-      }
-    });
-
-    otherPrices.forEach(p => {
-      const totalPrice = itemTotalLAK(p);
-      const isImported = importedSupplierPriceIds.has(p.id);
-      bills.push({
-        id: `single_${p.id}`,
-        supplier: p.supplier || 'OTHER',
-        date: pullDate,
-        totalPrice,
-        items: [p],
-        isGrouped: false,
-        sourceIds: [p.id],
-        isImported,
-        billImageUrl: p.billImageUrl || ''
-      });
-    });
-
-    return bills;
-  }, [supplierPrices, pullDate, importedSupplierPriceIds]);
-
-  // 🌟 ⚡ PULL SUPPLIER BILL (FAST ASYNC - NO BLOCKING ALERT)
-  const handlePullSupplierBill = async (bill: any) => {
-    if (!bill) return;
+  // 🌟 AUTOMATIC BILL SEQUENCE (SEQ) CALCULATION FOR SAME DATE + SAME SUPPLIER
+  const generatedBillNo = useMemo(() => {
     try {
-      setImportingBillId(bill.id);
-      const totalAmount = Math.round(bill.totalPrice || 0);
+      const parts = billDate.split('-');
+      if (parts.length === 3) {
+        const ddmmyyyy = `${parts[2]}${parts[1]}${parts[0]}`;
+        const code = SUPPLIER_CODES[supplier] || (supplier ? supplier.slice(0, 2).toUpperCase() : 'OT');
+        const basePrefix = `#${ddmmyyyy}${code}`;
 
-      if (totalAmount <= 0) {
-        showToast("ຍອດບິນຕ້ອງຫຼາຍກວ່າ 0 ₭", "error");
-        setImportingBillId(null);
-        return;
+        // Find existing distinct bills for this date and supplier
+        const existingBills = new Set<string>();
+        supplierPrices.forEach(p => {
+          if (p.date === billDate && p.supplier === supplier && p.billNo) {
+            existingBills.add(p.billNo);
+          }
+        });
+
+        // Auto assign next sequence
+        const seq = existingBills.size + 1;
+        return `${basePrefix}-${seq}`;
       }
-
-      const selectedSource: PaymentChannel = billPaymentSources[bill.id] || 'Onepay';
-      const todayLocal = new Date();
-      const localTimeString = `${String(todayLocal.getHours()).padStart(2, '0')}:${String(todayLocal.getMinutes()).padStart(2, '0')}`;
-
-      const pNames = bill.items.map((it: any) => products.find(prod => prod.id === it.productId)?.name || 'Item').join(', ');
-      const description = `ຊື້ເຄື່ອງເຂົ້າຮ້ານຈາກ ${bill.supplier}: ${pNames}`;
-
-      await addDoc(collection(db, 'transactions'), {
-        type: 'expense',
-        amount: totalAmount,
-        category: 'Purchasing',
-        description,
-        source: selectedSource,
-        receiptUrl: bill.billImageUrl || '',
-        date: paymentDate,
-        time: localTimeString,
-        updatedAt: serverTimestamp(),
-        createdAt: serverTimestamp(),
-        userId: auth.currentUser?.uid || 'admin',
-        userEmail: auth.currentUser?.email || 'admin@example.com',
-        supplierName: bill.supplier,
-        supplierPriceIds: bill.sourceIds,
-        branchId: selectedBranch || 'branch_1'
-      });
-
-      // 🌟 Clean In-App Toast
-      showToast(`ດຶງລາຍຈ່າຍຈາກ ${bill.supplier} (${totalAmount.toLocaleString()} ₭) ສຳເລັດ!`, "success");
-    } catch (err: any) {
-      console.error("Pull error:", err);
-      showToast(`ເກີດຂໍ້ຜິດພາດ: ${err.message}`, "error");
-    } finally {
-      setImportingBillId(null);
+    } catch {
+      // fallback
     }
-  };
+    return `#${format(new Date(), 'ddMMyyyy')}${SUPPLIER_CODES[supplier] || 'OT'}-1`;
+  }, [billDate, supplier, supplierPrices]);
 
-  // 🌟 FAST TRANSACTION SAVE
-  const handleAddTransaction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      setLoading(true);
-      const branchId = selectedBranch || 'branch_1';
-      const batchGroupId = `split_${Date.now()}`;
+  // Sort supplierPrices by date descending
+  const sortedSupplierPrices = useMemo(() => {
+    return [...supplierPrices].sort((a, b) => {
+      const dateA = a.date || '';
+      const dateB = b.date || '';
+      if (dateA !== dateB) return dateB.localeCompare(dateA);
+      const timeA = a.time || '';
+      const timeB = b.time || '';
+      return timeB.localeCompare(timeA);
+    });
+  }, [supplierPrices]);
 
-      if (formData.type === 'income' && is3WaySplit && !isEditing) {
-        const entries: Array<{ amount: number; source: PaymentChannel; label: string }> = [
-          { amount: splitCash, source: 'Cash', label: 'ສ່ວນເງິນສົດ' },
-          { amount: splitOnepay, source: 'Onepay', label: 'ສ່ວນ OnePay' },
-          { amount: splitLDB, source: 'LDB', label: 'ສ່ວນ LDB' }
-        ];
+  // ================= 📊 COGS THIS MONTH VS LAST MONTH COMPARISON =================
+  const cogsAnalytics = useMemo(() => {
+    const now = new Date();
+    const prevMonth = subMonths(now, 1);
 
-        let savedCount = 0;
-        for (const item of entries) {
-          if (item.amount > 0) {
-            await addDoc(collection(db, 'transactions'), {
-              type: 'income',
-              amount: item.amount,
-              category: formData.category || 'Sales',
-              description: formData.description ? `${formData.description} • ${item.label}` : item.label,
-              source: item.source,
-              receiptUrl: '',
-              date: formData.date,
-              time: formData.time,
-              batchGroupId,
-              updatedAt: serverTimestamp(),
-              createdAt: serverTimestamp(),
-              userId: auth.currentUser?.uid || 'admin',
-              userEmail: auth.currentUser?.email || 'admin@example.com',
-              branchId
-            });
-            savedCount++;
+    let currentMonthCOGS = 0;
+    let previousMonthCOGS = 0;
+
+    const daysInCurrentMonth = getDaysInMonth(now);
+    const dailyMap: { [day: number]: { day: string; thisMonth: number; lastMonth: number } } = {};
+
+    for (let d = 1; d <= 31; d++) {
+      dailyMap[d] = {
+        day: d < 10 ? `0${d}` : `${d}`,
+        thisMonth: 0,
+        lastMonth: 0
+      };
+    }
+
+    supplierPrices.forEach(p => {
+      if (!p.date) return;
+      try {
+        const d = parseISO(p.date);
+        const dayNum = getDate(d);
+        const cat = (p.category || 'purchasing').toLowerCase();
+
+        const isNew = p.totalPriceLAK !== undefined;
+        const amount = isNew
+          ? Number(p.totalPriceLAK || 0)
+          : (p.currency === 'LAK' ? Number(p.priceOriginal || 0) : Number(p.priceOriginal || 0) * Number(p.exchangeRate || 1)) * (Number(p.quantity) || 1);
+
+        const isPurchasing = cat.includes('purchas') || cat.includes('supply') || cat.includes('ຊື້') || cat === 'purchasing';
+
+        if (isSameMonth(d, now) && isPurchasing) {
+          currentMonthCOGS += amount;
+          if (dailyMap[dayNum]) {
+            dailyMap[dayNum].thisMonth += amount;
           }
         }
 
-        showToast(`ບັນທຶກລາຍຮັບແຍກ ${savedCount} ຊ່ອງທາງ (${formData.amount.toLocaleString()} ₭) ສຳເລັດ!`, "success");
-      } else {
-        const txData = {
-          type: formData.type,
-          amount: formData.amount,
-          category: formData.category,
-          description: formData.description,
-          source: formData.source,
-          receiptUrl: '',
-          date: formData.date,
-          time: formData.time,
-          updatedAt: serverTimestamp(),
+        if (isSameMonth(d, prevMonth) && isPurchasing) {
+          previousMonthCOGS += amount;
+          if (dailyMap[dayNum]) {
+            dailyMap[dayNum].lastMonth += amount;
+          }
+        }
+      } catch {}
+    });
+
+    const diffAmount = currentMonthCOGS - previousMonthCOGS;
+    const percentChange = previousMonthCOGS > 0 ? (diffAmount / previousMonthCOGS) * 100 : 0;
+    const comparisonChartData = Object.values(dailyMap).slice(0, daysInCurrentMonth);
+
+    return {
+      currentMonthCOGS,
+      previousMonthCOGS,
+      diffAmount,
+      percentChange,
+      comparisonChartData,
+      currentMonthName: format(now, 'MMMM yyyy'),
+      prevMonthName: format(prevMonth, 'MMMM yyyy')
+    };
+  }, [supplierPrices]);
+
+  // Handle Bill Image Upload & Compression
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      alert(i18n.language === 'la' ? 'ຮູບພາບມີຂະໜາດໃຫຍ່ເກີນ 5MB' : 'File is larger than 5MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 1200;
+        const scaleSize = MAX_WIDTH / img.width;
+        canvas.width = img.width > MAX_WIDTH ? MAX_WIDTH : img.width;
+        canvas.height = img.width > MAX_WIDTH ? (img.height * scaleSize) : img.height;
+        
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.75);
+        setBillImageBase64(compressedBase64);
+      };
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const addNewItemRow = () => {
+    setBillItems(prev => [
+      ...prev,
+      {
+        id: `item-${Date.now()}-${Math.random()}`,
+        productId: '',
+        productSearch: '',
+        unit: 'UNIT',
+        priceMode: 'total',
+        priceOriginal: 0,
+        displayPrice: '',
+        quantity: 1,
+        quantityPerUnit: 1,
+        remark: '',
+        isDropdownOpen: false
+      }
+    ]);
+  };
+
+  const removeItemRow = (index: number) => {
+    if (billItems.length <= 1) {
+      alert(i18n.language === 'la' ? 'ຕ້ອງມີຢ່າງໜ້ອຍ 1 ລາຍການໃນໃບບິນ' : 'At least 1 item is required.');
+      return;
+    }
+    setBillItems(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const updateItemRow = (index: number, fields: Partial<FormItemRow>) => {
+    setBillItems(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], ...fields };
+      return updated;
+    });
+  };
+
+  const formatWithCommas = (val: string) => {
+    const num = val.replace(/,/g, '');
+    if (!num) return '';
+    if (isNaN(Number(num))) return val;
+    return Number(num).toLocaleString();
+  };
+
+  const handleItemPriceChange = (index: number, rawVal: string) => {
+    const cleanNum = rawVal.replace(/,/g, '');
+    if (cleanNum === '' || !isNaN(Number(cleanNum))) {
+      updateItemRow(index, {
+        displayPrice: formatWithCommas(rawVal),
+        priceOriginal: Number(cleanNum) || 0
+      });
+    }
+  };
+
+  const grandTotalLAK = useMemo(() => {
+    const rate = currency === 'LAK' ? 1 : (Number(exchangeRate) || 1);
+    return billItems.reduce((acc, item) => {
+      const orig = Number(item.priceOriginal) || 0;
+      const qty = Number(item.quantity) || 1;
+      const totalOrig = item.priceMode === 'total' ? orig : orig * qty;
+      return acc + (totalOrig * rate);
+    }, 0);
+  }, [billItems, currency, exchangeRate]);
+
+  // Submit the Bill
+  const handleSaveBillBatch = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!supplier) {
+      alert(i18n.language === 'la' ? 'ກະລຸນາເລືອກຜູ້ສະໜອງ' : 'Please select a supplier.');
+      return;
+    }
+
+    for (let i = 0; i < billItems.length; i++) {
+      const item = billItems[i];
+      if (!item.productId) {
+        alert(i18n.language === 'la' 
+          ? `ລາຍການທີ ${i + 1} ຍັງບໍ່ໄດ້ເລືອກສິນຄ້າ` 
+          : `Item #${i + 1} does not have a selected product.`);
+        return;
+      }
+    }
+
+    try {
+      setSaveLoading(true);
+      const batchGroupId = `bill_${Date.now()}`;
+      const finalRate = currency === 'LAK' ? 1 : (Number(exchangeRate) || 1);
+
+      for (const item of billItems) {
+        const qty = Number(item.quantity) || 1;
+        const qtyPerUnit = Number(item.quantityPerUnit) || 1;
+        let singlePriceOriginal = Number(item.priceOriginal) || 0;
+        
+        if (item.priceMode === 'total') {
+          singlePriceOriginal = (Number(item.priceOriginal) || 0) / qty;
+        }
+
+        const calculatedPriceLAK = singlePriceOriginal * finalRate;
+        const totalOriginal = item.priceMode === 'total' ? Number(item.priceOriginal) || 0 : (Number(item.priceOriginal) || 0) * qty;
+        const totalLAK = totalOriginal * finalRate;
+
+        await addDoc(collection(db, 'supplierPrices'), {
+          billNo: generatedBillNo,
+          batchGroupId,
+          billImageUrl: billImageBase64 || '',
+          billRemark: billRemark.trim(),
+          productId: item.productId,
+          supplier,
+          category,
+          paymentMethod,
+          currency,
+          exchangeRate: finalRate,
+          priceOriginal: singlePriceOriginal,
+          priceLAK: calculatedPriceLAK,
+          totalPriceOriginal: totalOriginal,
+          totalPriceLAK: totalLAK,
+          quantity: qty,
+          quantityPerUnit: qtyPerUnit,
+          unit: item.unit || 'UNIT',
+          remark: item.remark || '',
+          date: billDate,
+          time: billTime,
+          priceMode: item.priceMode,
+          createdAt: serverTimestamp(),
           userId: auth.currentUser?.uid || 'admin',
           userEmail: auth.currentUser?.email || 'admin@example.com',
-          branchId
-        };
-
-        if (isEditing && editingId) {
-          await setDoc(doc(db, 'transactions', editingId), txData, { merge: true });
-          showToast("ແກ້ໄຂລາຍການສຳເລັດ!", "success");
-        } else {
-          await addDoc(collection(db, 'transactions'), {
-            ...txData,
-            createdAt: serverTimestamp()
-          });
-          showToast("ບັນທຶກລາຍການສຳເລັດ!", "success");
-        }
+        });
       }
 
-      setFormData({
-        type: 'expense',
-        amount: 0,
-        category: 'Purchasing',
-        description: '',
-        source: 'Cash',
-        receipt: null,
-        date: format(new Date(), 'yyyy-MM-dd'),
-        time: format(new Date(), 'HH:mm')
-      });
-      setDisplayAmount('');
-      setSplitCash(0);
-      setSplitCashDisplay('');
-      setSplitOnepay(0);
-      setSplitOnepayDisplay('');
-      setSplitLDB(0);
-      setSplitLDBDisplay('');
-      setIsEditing(false);
-      setEditingId(null);
+      alert(i18n.language === 'la' 
+        ? `ບັນທຶກເລກບິນ ${generatedBillNo} ສຳເລັດແລ້ວ!` 
+        : `Successfully saved Bill ${generatedBillNo}!`);
+
+      // Reset form
+      setBillImageBase64('');
+      setBillRemark('');
+      setBillItems([
+        {
+          id: `item-${Date.now()}`,
+          productId: '',
+          productSearch: '',
+          unit: 'UNIT',
+          priceMode: 'total',
+          priceOriginal: 0,
+          displayPrice: '',
+          quantity: 1,
+          quantityPerUnit: 1,
+          remark: '',
+          isDropdownOpen: false
+        }
+      ]);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+
     } catch (err: any) {
-      showToast(`Error: ${err.message}`, "error");
+      console.error("Save Error:", err);
+      handleFirestoreError(err, OperationType.CREATE, 'supplierPrices');
     } finally {
-      setLoading(false);
+      setSaveLoading(false);
     }
   };
 
-  const startEdit = (tx: any) => {
-    setTxToEdit(tx);
-    setShowEditPinModal(true);
-  };
-
-  const handleEditConfirmed = () => {
-    if (!txToEdit) return;
-    setFormData({
-      type: txToEdit.type,
-      amount: txToEdit.amount,
-      category: txToEdit.category || 'Purchasing',
-      description: txToEdit.description || '',
-      source: normalizePaymentChannel(txToEdit.source),
-      receipt: null,
-      date: txToEdit.date,
-      time: txToEdit.time || format(new Date(), 'HH:mm')
-    });
-    setDisplayAmount(txToEdit.amount.toLocaleString());
-    setIsEditing(true);
-    setEditingId(txToEdit.id);
-    setShowEditPinModal(false);
-    setTxToEdit(null);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const startDelete = (tx: any) => {
-    setTxToDelete(tx);
-    setShowDeletePinModal(true);
-  };
-
-  const handleDeleteConfirmed = async () => {
-    if (!txToDelete) return;
-    try {
-      setLoading(true);
-      await deleteDoc(doc(db, 'transactions', txToDelete.id));
-      showToast("ລຶບລາຍການສຳເລັດ!", "info");
-      setShowDeletePinModal(false);
-      setTxToDelete(null);
-    } catch (err: any) {
-      showToast(`Error: ${err.message}`, "error");
-    } finally {
-      setLoading(false);
+  // Quick Add unlisted custom product
+  const addUnlistedProductForItem = async (name: string, itemIndex: number) => {
+    const productName = prompt("Enter New Product Name:", name);
+    if (productName) {
+      try {
+        const docRef = await addDoc(collection(db, 'products'), {
+          name: productName.trim(),
+          unit: billItems[itemIndex]?.unit || 'UNIT',
+          isApproved: true,
+          createdAt: serverTimestamp()
+        });
+        updateItemRow(itemIndex, {
+          productId: docRef.id,
+          productSearch: productName.trim(),
+          isDropdownOpen: false
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, 'products');
+      }
     }
+  };
+
+  // Export to Excel
+  const handleExport = () => {
+    const headers = ['Bill No', 'Date', 'Category', 'Payment Method', 'Product', 'Supplier', 'Price LAK', 'Total LAK', 'Quantity', 'Unit', 'Remark', 'User'];
+    const rows = sortedSupplierPrices.map(p => [
+      p.billNo || '-',
+      p.date || format(p.createdAt?.toDate() || new Date(), 'yyyy-MM-dd'),
+      p.category || 'purchasing',
+      p.paymentMethod || 'Cash',
+      products.find(prod => prod.id === p.productId)?.name || 'Unknown',
+      p.supplier,
+      p.priceLAK || 0,
+      p.totalPriceLAK || (p.priceLAK * (p.quantity || 1)),
+      p.quantity,
+      p.unit,
+      p.remark || '',
+      p.userEmail || ''
+    ]);
+
+    const worksheet = utils.aoa_to_sheet([headers, ...rows]);
+    const workbook = utils.book_new();
+    utils.book_append_sheet(workbook, worksheet, 'Suppliers COGS Report');
+    writeFile(workbook, `suppliers_cogs_${format(new Date(), 'yyyy-MM-dd')}.xlsx`);
   };
 
   return (
-    <div className="space-y-6 relative">
-
-      {/* 🌟 IN-APP MODERN TOAST NOTIFICATION (ບໍ່ໃຊ້ alert ຂອງ browser) */}
-      {toast && (
-        <div className="fixed top-6 right-6 z-[100] animate-in fade-in slide-in-from-top-4 duration-300 pointer-events-none">
-          <div className={`px-5 py-3.5 rounded-2xl shadow-2xl backdrop-blur-xl border flex items-center gap-3 text-xs font-black tracking-wide ${
-            toast.type === 'success' 
-              ? 'bg-emerald-500 text-white border-emerald-400 shadow-emerald-500/30' 
-              : toast.type === 'error'
-                ? 'bg-rose-500 text-white border-rose-400 shadow-rose-500/30'
-                : 'bg-[#052659] text-white border-blue-400 shadow-blue-500/30'
-          }`}>
-            {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-            <span>{toast.message}</span>
-          </div>
-        </div>
-      )}
-
-      {/* ================= 1. HEADER & TIMEFRAME SWITCHER ================= */}
+    <div className="space-y-6">
+      
+      {/* ================= 1. TOP HEADER ================= */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-white dark:bg-[#073069] rounded-[2rem] border border-slate-200/70 dark:border-white/10 shadow-sm">
         <div className="flex items-center gap-3.5">
           <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-            <DollarSign className="w-6 h-6 animate-pulse" />
+            <ShoppingCart className="w-6 h-6" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-black uppercase tracking-wider text-slate-900 dark:text-white">
-                {i18n.language === 'la' ? 'ລະບົບບັນຊີ & ລາຍຮັບ-ລາຍຈ່າຍ (Financials Desk)' : 'Executive Financial Desk'}
-              </h2>
-              <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-                {(selectedBranch || 'branch_1') === 'branch_1' ? (i18n.language === 'la' ? 'ສາຂາ 1' : 'Branch 1') : (i18n.language === 'la' ? 'ສາຂາ 2' : 'Branch 2')}
-              </span>
-            </div>
+            <h2 className="text-sm font-black uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2">
+              {i18n.language === 'la' ? 'ລະບົບຈັດຊື້ & ຕົ້ນທຶນວັດຖຸດິບ (COGS Center)' : 'Procurement & COGS Management'}
+            </h2>
             <p className="text-[11px] text-slate-400 font-bold mt-0.5">
-              {timeframeMode === 'month' 
-                ? (i18n.language === 'la' ? `ສະແດງສະເພາະ: ເດືອນນີ້ (${format(new Date(), 'MMMM yyyy')})` : `Viewing: Current Month (${format(new Date(), 'MMMM yyyy')})`)
-                : (i18n.language === 'la' ? 'ສະແດງ: ຍອດລວມທັງໝົດ (All-Time)' : 'Viewing: All-Time Overall Data')}
+              {i18n.language === 'la' 
+                ? 'ຕິດຕາມຕົ້ນທຶນວັດຖຸດິບ • ປຽບທຽບເດືອນນີ້ vs ເດືອນກ່ອນ • ບັນທຶກບິນຈັດຊື້' 
+                : 'Raw Material Costs Tracker & Monthly Comparison'}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
-          <div className="flex bg-slate-100 dark:bg-black/25 p-1 rounded-2xl border border-slate-200 dark:border-white/10">
-            <button
-              type="button"
-              onClick={() => setTimeframeMode('month')}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all ${
-                timeframeMode === 'month' ? 'bg-[#052659] text-white shadow-md' : 'text-slate-500'
-              }`}
-            >
-              {i18n.language === 'la' ? 'ເດືອນນີ້' : 'This Month'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setTimeframeMode('all')}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all ${
-                timeframeMode === 'all' ? 'bg-[#052659] text-white shadow-md' : 'text-slate-500'
-              }`}
-            >
-              {i18n.language === 'la' ? 'ທັງໝົດ' : 'All-Time'}
-            </button>
-          </div>
-
+        <div className="flex items-center gap-2">
           <button 
-            onClick={() => setShowPrivacy(!showPrivacy)}
-            className="px-3.5 py-2 bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300 font-bold text-xs uppercase rounded-2xl transition-all cursor-pointer flex items-center gap-1.5"
+            type="button" 
+            onClick={() => setShowProductManager(true)}
+            className="flex items-center gap-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-white font-black text-xs uppercase rounded-xl transition-all"
           >
-            {showPrivacy ? <Eye className="w-3.5 h-3.5 text-emerald-500" /> : <EyeOff className="w-3.5 h-3.5" />}
-            <span>{showPrivacy ? "Show" : "Hide"}</span>
+            <List className="w-4 h-4 text-primary" />
+            <span>{i18n.language === 'la' ? 'ຈັດການສິນຄ້າ' : 'Catalog Items'}</span>
           </button>
         </div>
       </div>
 
-      {/* ================= 2. 4 PAYMENT LIQUIDITY CARDS ================= */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ================= 2. COGS THIS MONTH VS LAST MONTH COMPARISON ================= */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         
-        {/* Total Net Balance */}
-        <div className="bg-gradient-to-br from-[#052659] to-[#073069] text-white p-5 rounded-3xl shadow-xl space-y-2 relative overflow-hidden">
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] font-black uppercase tracking-widest text-[#5483B3]">
-              {i18n.language === 'la' ? 'ຍອດເງິນຄົງເຫຼືອລວມທັງໝົດ' : 'Total Net Cashflow'}
-            </span>
-            <div className="p-2 bg-white/10 rounded-xl">
-              <DollarSign className="w-4 h-4 text-emerald-400" />
+        {/* LEFT: COGS CURRENT MONTH SUMMARY (5 Cols) */}
+        <div className="lg:col-span-5 bg-gradient-to-br from-[#052659] via-[#073069] to-[#0b3c7e] text-white p-7 rounded-[2.5rem] shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-400/10 rounded-full -mr-16 -mt-16 blur-2xl pointer-events-none"></div>
+
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[#7eb3ea]">
+                {i18n.language === 'la' ? 'ຕົ້ນທຶນວັດຖຸດິບເດືອນປັດຈຸບັນ (COGS)' : 'Current Month Material COGS'}
+              </span>
+              <span className="px-2.5 py-1 rounded-full bg-white/10 text-[9px] font-mono font-bold">
+                {cogsAnalytics.currentMonthName}
+              </span>
+            </div>
+
+            <div>
+              <h3 className="text-3xl sm:text-4xl font-black font-mono tracking-tight text-white">
+                {Math.round(cogsAnalytics.currentMonthCOGS).toLocaleString()}
+                <span className="text-lg opacity-60 ml-2 font-sans font-bold">₭</span>
+              </h3>
+            </div>
+
+            {/* Change Badge */}
+            <div className="flex items-center gap-2 pt-1">
+              <span className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-black flex items-center gap-1 ${
+                cogsAnalytics.diffAmount > 0 
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' 
+                  : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+              }`}>
+                {cogsAnalytics.diffAmount > 0 ? (
+                  <>
+                    <ArrowUpRight className="w-3.5 h-3.5" />
+                    +{Math.abs(cogsAnalytics.percentChange).toFixed(1)}% ({i18n.language === 'la' ? 'ຕົ້ນທຶນເພີ່ມຂຶ້ນ' : 'Increase'})
+                  </>
+                ) : (
+                  <>
+                    <ArrowDownRight className="w-3.5 h-3.5" />
+                    -{Math.abs(cogsAnalytics.percentChange).toFixed(1)}% ({i18n.language === 'la' ? 'ຕົ້ນທຶນຫຼຸດລົງ' : 'Saved'})
+                  </>
+                )}
+              </span>
             </div>
           </div>
-          <p className="text-2xl font-black font-mono tracking-tight">
-            {showPrivacy ? '••••••••' : `${Math.round(financialSummary.totalNetLiquidity).toLocaleString()} ₭`}
-          </p>
-          <p className="text-[9px] text-blue-200/60 font-bold uppercase">
-            In: +{Math.round(financialSummary.totalRevenue).toLocaleString()} | Out: -{Math.round(financialSummary.totalExpenses).toLocaleString()}
-          </p>
-        </div>
 
-        {/* Cash In Hand */}
-        <div className="bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm space-y-2">
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] font-black uppercase tracking-widest text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-              <Wallet className="w-3.5 h-3.5" />
-              <span>{i18n.language === 'la' ? 'ເງິນສົດໃນມື (Cash)' : 'Cash in Hand'}</span>
-            </span>
-            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-emerald-500/10 text-emerald-600 rounded font-bold">Cash</span>
-          </div>
-          <p className="text-xl font-black font-mono text-slate-800 dark:text-white">
-            {showPrivacy ? '••••••' : `${Math.round(financialSummary.cashNet).toLocaleString()} ₭`}
-          </p>
-          <div className="flex justify-between text-[9px] text-slate-400 font-bold">
-            <span className="text-emerald-500">+{Math.round(financialSummary.cashIncome).toLocaleString()}</span>
-            <span className="text-red-500">-{Math.round(financialSummary.cashExpense).toLocaleString()}</span>
+          {/* Reference row */}
+          <div className="pt-5 border-t border-white/10 mt-6 grid grid-cols-2 gap-4">
+            <div>
+              <span className="text-[9.5px] font-black uppercase text-slate-300">
+                {i18n.language === 'la' ? 'ເດືອນຜ່ານມາ (Last Month)' : 'Previous Month COGS'}
+              </span>
+              <p className="text-base font-black font-mono text-slate-200 mt-0.5">
+                {Math.round(cogsAnalytics.previousMonthCOGS).toLocaleString()} ₭
+              </p>
+            </div>
+
+            <div>
+              <span className="text-[9.5px] font-black uppercase text-slate-300">
+                {i18n.language === 'la' ? 'ຜົນຕ່າງ (Net Diff)' : 'Net Difference'}
+              </span>
+              <p className={`text-base font-black font-mono mt-0.5 ${cogsAnalytics.diffAmount > 0 ? 'text-rose-300' : 'text-emerald-300'}`}>
+                {cogsAnalytics.diffAmount > 0 ? '+' : ''}{Math.round(cogsAnalytics.diffAmount).toLocaleString()} ₭
+              </p>
+            </div>
           </div>
         </div>
 
-        {/* BCEL OnePay */}
-        <div className="bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm space-y-2">
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] font-black uppercase tracking-widest text-red-500 dark:text-red-400 flex items-center gap-1.5">
-              <CreditCard className="w-3.5 h-3.5" />
-              <span>{i18n.language === 'la' ? 'BCEL OnePay' : 'OnePay Balance'}</span>
-            </span>
-            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-red-500/10 text-red-500 rounded font-bold">OnePay</span>
-          </div>
-          <p className="text-xl font-black font-mono text-slate-800 dark:text-white">
-            {showPrivacy ? '••••••' : `${Math.round(financialSummary.onepayNet).toLocaleString()} ₭`}
-          </p>
-          <div className="flex justify-between text-[9px] text-slate-400 font-bold">
-            <span className="text-emerald-500">+{Math.round(financialSummary.onepayIncome).toLocaleString()}</span>
-            <span className="text-red-500">-{Math.round(financialSummary.onepayExpense).toLocaleString()}</span>
-          </div>
-        </div>
+        {/* RIGHT: COGS COMPARISON GRAPH (7 Cols) */}
+        <div className="lg:col-span-7 bg-white dark:bg-[#073069] p-6 rounded-[2.5rem] border border-slate-200/70 dark:border-white/10 shadow-sm space-y-4 flex flex-col justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-white/10 pb-3">
+            <div>
+              <h3 className="text-xs font-black uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2">
+                <TrendingUp className="w-4 h-4 text-emerald-500" />
+                <span>{i18n.language === 'la' ? 'ກຣາຟສົມທຽບຕົ້ນທຶນ (ເດືອນນີ້ VS ເດືອນກ່ອນ)' : 'COGS Comparison: This Month vs Last Month'}</span>
+              </h3>
+              <p className="text-[10px] text-slate-400 font-bold uppercase mt-0.5">
+                {cogsAnalytics.currentMonthName} vs {cogsAnalytics.prevMonthName} (Day 1 - 31)
+              </p>
+            </div>
 
-        {/* LDB Bank */}
-        <div className="bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm space-y-2">
-          <div className="flex justify-between items-center">
-            <span className="text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
-              <Building2 className="w-3.5 h-3.5" />
-              <span>{i18n.language === 'la' ? 'ທະນາຄານ LDB' : 'LDB Balance'}</span>
-            </span>
-            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-blue-500/10 text-blue-600 rounded font-bold">LDB</span>
+            <div className="flex gap-3 text-[9.5px] font-black uppercase">
+              <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> 
+                {i18n.language === 'la' ? 'ເດືອນນີ້' : 'This Month'}
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-400">
+                <span className="w-2.5 h-2.5 rounded-full bg-slate-300 dark:bg-slate-600"></span> 
+                {i18n.language === 'la' ? 'ເດືອນກ່ອນ' : 'Last Month'}
+              </span>
+            </div>
           </div>
-          <p className="text-xl font-black font-mono text-slate-800 dark:text-white">
-            {showPrivacy ? '••••••' : `${Math.round(financialSummary.ldbNet).toLocaleString()} ₭`}
-          </p>
-          <div className="flex justify-between text-[9px] text-slate-400 font-bold">
-            <span className="text-emerald-500">+{Math.round(financialSummary.ldbIncome).toLocaleString()}</span>
-            <span className="text-red-500">-{Math.round(financialSummary.ldbExpense).toLocaleString()}</span>
+
+          <div className="h-[220px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={cogsAnalytics.comparisonChartData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.2} />
+                <XAxis dataKey="day" tick={{fontSize: 9, fontWeight: 700}} axisLine={false} tickLine={false} />
+                <YAxis hide />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#052659', borderRadius: '12px', fontSize: '11px', color: '#fff', border: 'none' }}
+                  formatter={(val: number) => [`${val.toLocaleString()} ₭`, '']}
+                />
+                <Bar dataKey="thisMonth" fill="#10b981" radius={[4, 4, 0, 0]} name={i18n.language === 'la' ? 'ເດືອນນີ້' : 'This Month'} />
+                <Bar dataKey="lastMonth" fill="#94a3b8" radius={[4, 4, 0, 0]} name={i18n.language === 'la' ? 'ເດືອນກ່ອນ' : 'Last Month'} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </div>
 
       </div>
 
-      {/* ================= 3. TRANSACTION FORM & PULL SUPPLIER CARD ================= */}
+      {/* ================= 3. 🌟 CLEAN 4-SECTION PROCUREMENT CARD (NO OVERLAP + AUTO SEQ) ================= */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
 
-        {/* FORM (5 Cols) */}
+        {/* LEFT: 4-SECTION ENTRY CARD (5 Cols) */}
         <div className="xl:col-span-5 space-y-6">
-          
-          {/* Manual Entry Form */}
-          <div className="high-density-card bg-white dark:bg-[#073069] p-5 sm:p-6 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-xl space-y-4">
-            <div className="flex justify-between items-center border-b border-slate-100 dark:border-white/10 pb-3">
-              <h3 className="text-xs font-black uppercase text-slate-800 dark:text-white flex items-center gap-2">
-                <PlusCircle className="w-4 h-4 text-emerald-500" />
-                <span>{isEditing ? 'ແກ້ໄຂລາຍການ' : 'ບັນທຶກລາຍການ (Transaction Entry)'}</span>
-              </h3>
-              {isEditing && (
-                <button 
-                  onClick={() => {
-                    setIsEditing(false);
-                    setEditingId(null);
-                    setDisplayAmount('');
-                  }}
-                  className="text-[9px] font-black text-red-500 uppercase"
+          <div className="bg-white dark:bg-[#073069] rounded-[2.5rem] p-6 sm:p-7 border border-slate-200/80 dark:border-white/10 shadow-xl space-y-6">
+            
+            {/* Header & Mode Switch */}
+            <div className="flex justify-between items-center border-b border-slate-100 dark:border-white/10 pb-4">
+              <div>
+                <span className="px-2.5 py-1 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-full text-[9px] font-black uppercase tracking-wider">
+                  {entryMode === 'batch' ? 'BATCH PROCUREMENT' : 'SINGLE ENTRY'}
+                </span>
+                <h3 className="text-sm font-black text-slate-800 dark:text-white uppercase tracking-tight flex items-center gap-2 mt-1">
+                  <Receipt className="w-4 h-4 text-emerald-500" />
+                  <span>{i18n.language === 'la' ? 'ບັນທຶກບິນຈັດຊື້' : 'New Procurement Bill'}</span>
+                </h3>
+              </div>
+
+              <div className="flex bg-slate-100 dark:bg-black/25 p-1 rounded-2xl border border-slate-200/80 dark:border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setEntryMode('batch')}
+                  className={`px-3 py-1 text-[10px] font-black uppercase rounded-xl transition-all cursor-pointer ${
+                    entryMode === 'batch' 
+                      ? 'bg-[#052659] text-white shadow-xs' 
+                      : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                  }`}
                 >
-                  Cancel
+                  {i18n.language === 'la' ? 'ຫຼາຍລາຍການ' : 'Multi-Item'}
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEntryMode('single');
+                    if (billItems.length > 1) {
+                      setBillItems([billItems[0]]);
+                    }
+                  }}
+                  className={`px-3 py-1 text-[10px] font-black uppercase rounded-xl transition-all cursor-pointer ${
+                    entryMode === 'single' 
+                      ? 'bg-[#052659] text-white shadow-xs' 
+                      : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                  }`}
+                >
+                  {i18n.language === 'la' ? 'ລາຍການດ່ຽວ' : 'Single'}
+                </button>
+              </div>
             </div>
 
-            <form onSubmit={handleAddTransaction} className="space-y-4">
+            <form onSubmit={handleSaveBillBatch} className="space-y-6">
               
-              {/* Type Switcher: Income vs Expense */}
-              <div className="flex bg-slate-100 dark:bg-black/20 p-1 rounded-xl">
-                <button 
-                  type="button" 
-                  onClick={() => setFormData({...formData, type: 'expense', category: 'Purchasing'})}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all ${formData.type === 'expense' ? 'bg-[#052659] text-white shadow-xs' : 'text-slate-500'}`}
-                >
-                  {t('expense')} (ລາຍຈ່າຍ)
-                </button>
-                <button 
-                  type="button" 
-                  onClick={() => setFormData({...formData, type: 'income', category: 'Sales'})}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all ${formData.type === 'income' ? 'bg-[#052659] text-white shadow-xs' : 'text-slate-500'}`}
-                >
-                  {t('income')} (ລາຍຮັບ)
-                </button>
-              </div>
-
-              {/* Date & Time */}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">Date</label>
-                  <input 
-                    type="date"
-                    required
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white"
-                    value={formData.date}
-                    onChange={e => setFormData({...formData, date: e.target.value})}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">Time</label>
-                  <input 
-                    type="time"
-                    required
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white"
-                    value={formData.time}
-                    onChange={e => setFormData({...formData, time: e.target.value})}
-                  />
-                </div>
-              </div>
-
-              {/* Total Amount Input */}
-              <div className="space-y-1">
-                <div className="flex justify-between items-center">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">
-                    {i18n.language === 'la' ? 'ຍອດເງິນທັງໝົດ (Total Amount ₭)' : 'Total Amount (₭)'}
-                  </label>
-                  {formData.type === 'income' && (
-                    <span className="text-[9px] font-black text-emerald-500 flex items-center gap-1 uppercase">
-                      <Split className="w-3 h-3" />
-                      Auto-Balancing Split Active
+              {/* 🏷️ SECTION 1: ຂໍ້ມູນໃບບິນ & ຜູ້ສະໜອງ (FIXED OVERLAP & AUTO SEQ) */}
+              <div className="p-4 bg-slate-50/80 dark:bg-black/20 rounded-2xl border border-slate-200/60 dark:border-white/5 space-y-4">
+                
+                {/* Section Title & Auto Bill No Display */}
+                <div className="flex justify-between items-center border-b border-slate-200/60 dark:border-white/5 pb-2.5">
+                  <span className="text-[10.5px] font-black uppercase text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[9px] font-black">1</span>
+                    <span>{i18n.language === 'la' ? 'ຂໍ້ມູນໃບບິນ & ຜູ້ສະໜອງ' : 'Bill Header & Vendor'}</span>
+                  </span>
+                  
+                  {/* 🌟 Auto Generated Bill No Badge */}
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] font-mono font-black text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-lg">
+                      {generatedBillNo}
                     </span>
+                  </div>
+                </div>
+
+                {/* 🌟 CLEAN DATE & TIME LAYOUT (NO OVERLAP) */}
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400 flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-slate-400" />
+                      <span>{i18n.language === 'la' ? 'ວັນທີຊື້ (Purchase Date)' : 'Purchase Date'}</span>
+                    </label>
+                    <input 
+                      type="date"
+                      required
+                      className="w-full h-11 px-3.5 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white outline-none"
+                      value={billDate}
+                      onChange={e => setBillDate(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400 flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-slate-400" />
+                      <span>{i18n.language === 'la' ? 'ເວລາ (Time)' : 'Time'}</span>
+                    </label>
+                    <input 
+                      type="time"
+                      required
+                      className="w-full h-11 px-3.5 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white outline-none"
+                      value={billTime}
+                      onChange={e => setBillTime(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* Supplier Selection */}
+                <div className="space-y-1">
+                  <label className="text-[9.5px] font-black uppercase text-slate-400">
+                    {i18n.language === 'la' ? 'ຜູ້ສະໜອງສິນຄ້າ (Supplier)' : 'Supplier'}
+                  </label>
+                  <select 
+                    className="w-full h-11 px-3 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-bold outline-none text-slate-800 dark:text-white cursor-pointer"
+                    value={supplier}
+                    onChange={e => setSupplier(e.target.value)}
+                    required
+                  >
+                    <option value="CHANHOM">CHANHOM (CH)</option>
+                    <option value="LATDA">LATDA (LD)</option>
+                    <option value="HEAVENLY">HEAVENLY (HV)</option>
+                    <option value="DMART">DMART (DM)</option>
+                    <option value="MARRY ANN">MARRY ANN (MA)</option>
+                    <option value="OTHER">Other (OT)</option>
+                  </select>
+                </div>
+
+                {/* Category & Payment Method */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400">
+                      {i18n.language === 'la' ? 'ປະເພດ' : 'Category'}
+                    </label>
+                    <select 
+                      className="w-full h-10 px-2.5 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-bold outline-none text-slate-800 dark:text-white cursor-pointer"
+                      value={category}
+                      onChange={e => setCategory(e.target.value as ExpenseCategory)}
+                      required
+                    >
+                      <option value="purchasing">🛒 Purchasing (COGS)</option>
+                      <option value="rental">🏠 Rental (ຄ່າເຊົ່າ)</option>
+                      <option value="salary">👥 Salary (ເງິນເດືອນ)</option>
+                      <option value="operation">⚙️ Operation (ດຳເນີນງານ)</option>
+                      <option value="admin">💼 Admin (ບໍລິຫານ)</option>
+                      <option value="other">📦 Other (ອື່ນໆ)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400">
+                      {i18n.language === 'la' ? 'ຊ່ອງທາງຈ່າຍ' : 'Payment'}
+                    </label>
+                    <select 
+                      className="w-full h-10 px-2.5 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-bold outline-none text-slate-800 dark:text-white cursor-pointer"
+                      value={paymentMethod}
+                      onChange={e => setPaymentMethod(e.target.value as PaymentMethod)}
+                      required
+                    >
+                      <option value="Cash">💵 Cash (ເງິນສົດ)</option>
+                      <option value="Onepay">📱 Onepay (BCEL)</option>
+                      <option value="LDB">🏦 LDB (ທະນາຄານ)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Currency & Exchange Rate */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400">Currency</label>
+                    <select 
+                      className="w-full h-10 px-2.5 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-bold outline-none text-slate-800 dark:text-white"
+                      value={currency}
+                      onChange={e => {
+                        const c = e.target.value;
+                        setCurrency(c);
+                        if (c === 'LAK') setExchangeRate(1);
+                      }}
+                    >
+                      <option value="LAK">LAK (₭)</option>
+                      <option value="THB">THB (฿)</option>
+                      <option value="USD">USD ($)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400">Exchange Rate</label>
+                    <input 
+                      type="number"
+                      step="any"
+                      disabled={currency === 'LAK'}
+                      className="w-full h-10 px-3 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-xs font-mono font-bold text-slate-800 dark:text-white disabled:opacity-40"
+                      value={currency === 'LAK' ? 1 : exchangeRate}
+                      onChange={e => setExchangeRate(parseFloat(e.target.value) || 1)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 📸 SECTION 2: ແນບຮູບໃບບິນ (RECEIPT ATTACHMENT) */}
+              <div className="p-4 bg-slate-50/80 dark:bg-black/20 rounded-2xl border border-slate-200/60 dark:border-white/5 space-y-3">
+                <div className="flex justify-between items-center border-b border-slate-200/60 dark:border-white/5 pb-2">
+                  <span className="text-[10px] font-black uppercase text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-blue-500 text-white flex items-center justify-center text-[9px] font-black">2</span>
+                    <span>{i18n.language === 'la' ? 'ຮູບໃບບິນແນບ (Receipt Photo)' : 'Receipt Photo'}</span>
+                  </span>
+                  {billImageBase64 && (
+                    <button
+                      type="button"
+                      onClick={() => setBillImageBase64('')}
+                      className="text-[9px] font-black text-red-500 hover:underline uppercase"
+                    >
+                      Remove
+                    </button>
                   )}
                 </div>
-                <input 
-                  type="text"
-                  required
-                  placeholder="0"
-                  className="w-full h-11 px-3 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-lg font-mono font-black text-slate-800 dark:text-white"
-                  value={displayAmount}
-                  onChange={handleTotalAmountChange}
-                />
-              </div>
 
-              {/* 3-Way Split Section for Income */}
-              {formData.type === 'income' && !isEditing && (
-                <div className="p-3.5 bg-emerald-500/5 dark:bg-emerald-500/10 border border-emerald-500/20 rounded-2xl space-y-3">
-                  <div className="flex justify-between items-center border-b border-emerald-500/10 pb-2">
-                    <span className="text-[10px] font-black uppercase text-emerald-700 dark:text-emerald-400 flex items-center gap-1">
-                      <span>💵📱🏦</span>
-                      <span>ແບ່ງ 3 ສ່ວນລາຍຮັບ (Auto-Balance)</span>
-                    </span>
-                    <span className="text-[9px] font-mono font-bold text-slate-400">
-                      Sum: {(splitCash + splitOnepay + splitLDB).toLocaleString()} ₭
-                    </span>
+                {billImageBase64 ? (
+                  <div className="relative group rounded-xl overflow-hidden border border-slate-200 dark:border-white/10 max-h-36 bg-black/10 flex items-center justify-center">
+                    <img src={billImageBase64} alt="Receipt Preview" className="w-full h-36 object-cover" />
+                    <button
+                      type="button"
+                      onClick={() => setPreviewImageUrl(billImageBase64)}
+                      className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1 text-white text-xs font-bold"
+                    >
+                      <Eye className="w-4 h-4" />
+                      <span>{i18n.language === 'la' ? 'ເບິ່ງຮູບໃຫຍ່' : 'View Full'}</span>
+                    </button>
                   </div>
-
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="space-y-1">
-                      <label className="text-[8.5px] font-black uppercase text-emerald-600 dark:text-emerald-400 block truncate">
-                        1. ເງິນສົດ (Cash)
-                      </label>
-                      <input 
-                        type="text"
-                        placeholder="0"
-                        className="w-full h-9 px-2 rounded-xl bg-white dark:bg-[#073069] border border-emerald-500/20 text-xs font-mono font-bold text-slate-800 dark:text-white"
-                        value={splitCashDisplay}
-                        onChange={e => handleSplitCashChange(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[8.5px] font-black uppercase text-red-500 dark:text-red-400 block truncate">
-                        2. BCEL OnePay
-                      </label>
-                      <input 
-                        type="text"
-                        placeholder="0"
-                        className="w-full h-9 px-2 rounded-xl bg-white dark:bg-[#073069] border border-red-500/20 text-xs font-mono font-bold text-slate-800 dark:text-white"
-                        value={splitOnepayDisplay}
-                        onChange={e => handleSplitOnepayChange(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[8.5px] font-black uppercase text-blue-500 dark:text-blue-400 block truncate">
-                        3. ທະນາຄານ LDB
-                      </label>
-                      <input 
-                        type="text"
-                        placeholder="0"
-                        className="w-full h-9 px-2 rounded-xl bg-white dark:bg-[#073069] border border-blue-500/20 text-xs font-mono font-bold text-slate-800 dark:text-white"
-                        value={splitLDBDisplay}
-                        onChange={e => handleSplitLDBChange(e.target.value)}
-                      />
-                    </div>
+                ) : (
+                  <div>
+                    <input 
+                      type="file"
+                      ref={fileInputRef}
+                      accept="image/*"
+                      onChange={handleImageUpload}
+                      className="hidden"
+                      id="supplier-bill-upload-box"
+                    />
+                    <label 
+                      htmlFor="supplier-bill-upload-box"
+                      className="w-full py-3 px-4 rounded-xl border border-dashed border-slate-300 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/5 transition-all flex items-center justify-center gap-2 cursor-pointer text-slate-500 dark:text-slate-400 text-xs font-bold"
+                    >
+                      <Upload className="w-4 h-4 text-blue-500" />
+                      <span>{i18n.language === 'la' ? 'ອັບໂຫຼດຮູບໃບບິນ (JPG/PNG)' : 'Upload Receipt Photo'}</span>
+                    </label>
                   </div>
-                </div>
-              )}
-
-              {/* Category & Payment Channel */}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">Category</label>
-                  <select 
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white"
-                    value={formData.category}
-                    onChange={e => setFormData({...formData, category: e.target.value})}
-                    required
-                  >
-                    {formData.type === 'income' ? (
-                      <>
-                        <option value="Sales">📈 Sales (ຍອດຂາຍປະຈຳວັນ)</option>
-                        <option value="dividends">💰 Dividends (ປັນຜົນ)</option>
-                        <option value="other">📦 Other Income (ອື່ນໆ)</option>
-                      </>
-                    ) : (
-                      <>
-                        <option value="Purchasing">🛒 Purchasing (ວັດຖຸດິບ)</option>
-                        <option value="rent">🏠 Rent (ຄ່າເຊົ່າ)</option>
-                        <option value="salary">👥 Salary (ເງິນເດືອນ)</option>
-                        <option value="operations">⚙️ Operations (ດຳເນີນງານ)</option>
-                        <option value="admin">💼 Admin (ບໍລິຫານ)</option>
-                        <option value="electricity">⚡ Electricity (ຄ່າໄຟ)</option>
-                        <option value="water">💧 Water (ຄ່ານ້ຳ)</option>
-                        <option value="other">📦 Other (ອື່ນໆ)</option>
-                      </>
-                    )}
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">
-                    {formData.type === 'income' && !isEditing ? 'Default Channel' : 'Paid Via'}
-                  </label>
-                  <select 
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white"
-                    value={formData.source}
-                    onChange={e => setFormData({...formData, source: e.target.value as PaymentChannel})}
-                  >
-                    <option value="Cash">💵 Cash (ເງິນສົດ)</option>
-                    <option value="Onepay">📱 BCEL OnePay</option>
-                    <option value="LDB">🏦 ທະນາຄານ LDB</option>
-                  </select>
-                </div>
+                )}
               </div>
 
-              {/* Description */}
-              <div className="space-y-1">
-                <label className="text-[9.5px] font-black uppercase text-slate-400">Description / Memo</label>
-                <input 
-                  type="text"
-                  placeholder="Memo..."
-                  className="w-full h-10 px-3 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs text-slate-800 dark:text-white"
-                  value={formData.description}
-                  onChange={e => setFormData({...formData, description: e.target.value})}
-                />
-              </div>
-
-              <button 
-                type="submit" 
-                disabled={loading}
-                className="w-full h-11 bg-emerald-500 hover:bg-emerald-600 text-white font-black text-xs uppercase rounded-2xl transition-all shadow-lg shadow-emerald-500/20 cursor-pointer"
-              >
-                {loading ? 'Processing...' : (isEditing ? 'Update Transaction' : 'Save Transaction')}
-              </button>
-            </form>
-          </div>
-
-          {/* 🌟 🌟 🌟 ກ່ອງດຶງລາຍຈ່າຍຜູ້ສະໜອງ (PULL SUPPLIER PURCHASES - FAST & SMOOTH) 🌟 🌟 🌟 */}
-          <div className="bg-white dark:bg-[#073069] p-5 sm:p-6 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-xl space-y-4">
-            <div className="flex justify-between items-center border-b border-slate-100 dark:border-white/10 pb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-                  <Sparkles className="w-4 h-4" />
+              {/* 🛒 SECTION 3: ລາຍການສິນຄ້າໃນບິນ (BILL LINE ITEMS) */}
+              <div className="p-4 bg-slate-50/80 dark:bg-black/20 rounded-2xl border border-slate-200/60 dark:border-white/5 space-y-4">
+                <div className="flex justify-between items-center border-b border-slate-200/60 dark:border-white/5 pb-2">
+                  <span className="text-[10px] font-black uppercase text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center text-[9px] font-black">3</span>
+                    <span>{entryMode === 'batch' ? `ລາຍການສິນຄ້າ (${billItems.length} ອັນ)` : 'ລາຍການສິນຄ້າ'}</span>
+                  </span>
+                  
+                  {entryMode === 'batch' && (
+                    <button
+                      type="button"
+                      onClick={addNewItemRow}
+                      className="flex items-center gap-1 px-3 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl text-[9.5px] font-black uppercase transition-all cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>{i18n.language === 'la' ? 'ເພີ່ມລາຍການ' : 'Add Item'}</span>
+                    </button>
+                  )}
                 </div>
-                <div>
-                  <h3 className="text-xs font-black uppercase text-slate-900 dark:text-white">
-                    {i18n.language === 'la' ? 'ດຶງລາຍຈ່າຍຜູ້ສະໜອງ (Pull Supplier)' : 'Pull Supplier Purchases'}
-                  </h3>
-                  <p className="text-[9.5px] text-slate-400 font-bold">ດຶງບິນຈາກ Suppliers ມາເປັນລາຍຈ່າຍຮ້ານ</p>
-                </div>
-              </div>
-            </div>
 
-            {/* Date Selectors */}
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400">1. ວັນທີຜູ້ສະໜອງ</label>
-                <input 
-                  type="date"
-                  value={pullDate}
-                  onChange={e => setPullDate(e.target.value)}
-                  className="w-full h-9 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
-                />
-              </div>
+                <div className="space-y-3">
+                  {billItems.map((item, index) => {
+                    const selectedProd = products.find(p => p.id === item.productId);
 
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400">2. ວັນທີຊຳລະ</label>
-                <input 
-                  type="date"
-                  value={paymentDate}
-                  onChange={e => setPaymentDate(e.target.value)}
-                  className="w-full h-9 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-blue-500 cursor-pointer"
-                />
-              </div>
-            </div>
-
-            {/* Supplier Bills List */}
-            <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
-              {supplierBillsForSelectedDate.length === 0 ? (
-                <div className="p-6 text-center text-slate-400 text-xs font-bold uppercase tracking-wider border border-dashed border-slate-200 dark:border-white/10 rounded-2xl">
-                  {i18n.language === 'la' ? 'ບໍ່ມີບິນຜູ້ສະໜອງໃນວັນທີນີ້' : 'No supplier bills for this date'}
-                </div>
-              ) : (
-                supplierBillsForSelectedDate.map(bill => {
-                  const currentChannel: PaymentChannel = billPaymentSources[bill.id] || 'Onepay';
-
-                  return (
-                    <div key={bill.id} className="p-3.5 rounded-2xl bg-slate-50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 space-y-2.5">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <span className="text-xs font-black uppercase text-slate-900 dark:text-white block">
-                            {bill.supplier}
+                    return (
+                      <div 
+                        key={item.id} 
+                        className="p-3.5 rounded-2xl bg-white dark:bg-[#073069] border border-slate-200/70 dark:border-white/10 space-y-2.5 shadow-xs"
+                      >
+                        <div className="flex justify-between items-center">
+                          <span className="text-[9.5px] font-black uppercase px-2 py-0.5 bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300 rounded-md font-mono">
+                            Item #{index + 1}
                           </span>
-                          <span className="text-[9.5px] text-slate-400 font-medium line-clamp-1 mt-0.5">
-                            {bill.items.map((it: any) => products.find(prod => prod.id === it.productId)?.name || 'Item').join(', ')}
-                          </span>
-                        </div>
-                        <span className="text-xs font-mono font-black text-slate-900 dark:text-white">
-                          {Math.round(bill.totalPrice).toLocaleString()} ₭
-                        </span>
-                      </div>
 
-                      {/* Action Row */}
-                      <div className="flex items-center gap-2 pt-1 border-t border-slate-200/50 dark:border-white/5">
-                        {!bill.isImported ? (
-                          <>
-                            <select 
-                              value={currentChannel}
-                              onChange={e => setBillPaymentSources({ ...billPaymentSources, [bill.id]: e.target.value as PaymentChannel })}
-                              className="h-8 px-2 rounded-xl bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 text-[10px] font-bold text-slate-800 dark:text-white outline-none cursor-pointer"
-                            >
-                              <option value="Onepay">📱 OnePay</option>
-                              <option value="Cash">💵 Cash</option>
-                              <option value="LDB">🏦 LDB</option>
-                            </select>
-
+                          {billItems.length > 1 && (
                             <button
                               type="button"
-                              onClick={() => handlePullSupplierBill(bill)}
-                              disabled={importingBillId === bill.id}
-                              className="flex-1 h-8 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center justify-center gap-1 shadow-md cursor-pointer"
+                              onClick={() => removeItemRow(index)}
+                              className="p-1 text-slate-400 hover:text-red-500 transition-colors"
                             >
-                              <Check className="w-3.5 h-3.5" />
-                              <span>{importingBillId === bill.id ? 'ກຳລັງດຶງ...' : 'ດຶງລາຍຈ່າຍ (Pull)'}</span>
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                          </>
-                        ) : (
-                          <span className="text-[9.5px] text-emerald-600 dark:text-emerald-400 font-black uppercase flex items-center gap-1">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            <span>✓ ດຶງມາເປັນລາຍຈ່າຍແລ້ວ</span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
+                          )}
+                        </div>
 
+                        {/* Product Search */}
+                        <div className="space-y-1 relative">
+                          <input 
+                            type="text"
+                            required
+                            className={`w-full h-10 px-3 pr-8 rounded-xl bg-slate-50 dark:bg-black/20 border text-xs font-bold outline-none ${
+                              !item.productId && item.productSearch ? 'border-amber-400' : 'border-slate-200 dark:border-white/10 text-slate-800 dark:text-white'
+                            }`}
+                            placeholder={t('search_params') + "..."}
+                            value={item.isDropdownOpen ? item.productSearch : (selectedProd?.name || item.productSearch)}
+                            onFocus={() => {
+                              if (selectedProd && !item.productSearch) updateItemRow(index, { productSearch: selectedProd.name });
+                              updateItemRow(index, { isDropdownOpen: true });
+                            }}
+                            onBlur={() => setTimeout(() => updateItemRow(index, { isDropdownOpen: false }), 250)}
+                            onChange={(e) => updateItemRow(index, { productSearch: e.target.value, isDropdownOpen: true, productId: '' })}
+                          />
+                          <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+
+                          {item.isDropdownOpen && (
+                            <div className="absolute z-50 left-0 right-0 mt-1 bg-white dark:bg-[#073069] border border-slate-200 dark:border-white/10 rounded-2xl shadow-2xl max-h-44 overflow-y-auto">
+                              {products
+                                .filter(p => !item.productSearch || p.name.toLowerCase().includes(item.productSearch.toLowerCase()))
+                                .map(p => (
+                                  <button
+                                    key={p.id}
+                                    type="button"
+                                    className="w-full text-left p-2.5 hover:bg-slate-100 dark:hover:bg-white/10 border-b border-slate-50 dark:border-white/5 flex justify-between items-center"
+                                    onClick={() => {
+                                      updateItemRow(index, {
+                                        productId: p.id,
+                                        productSearch: p.name,
+                                        unit: p.unit || item.unit,
+                                        quantityPerUnit: p.packSize || 1,
+                                        isDropdownOpen: false
+                                      });
+                                    }}
+                                  >
+                                    <span className="text-xs font-bold text-slate-800 dark:text-white">{p.name}</span>
+                                    <span className="text-[9px] text-slate-400 font-bold uppercase">{p.unit || 'UNIT'}</span>
+                                  </button>
+                              ))}
+
+                              {item.productSearch && !products.some(p => p.name.toLowerCase() === item.productSearch.toLowerCase()) && (
+                                <button
+                                  type="button"
+                                  className="w-full text-left p-2.5 bg-primary/5 text-primary text-xs font-bold uppercase"
+                                  onClick={() => addUnlistedProductForItem(item.productSearch, index)}
+                                >
+                                  + Add Custom "{item.productSearch}"
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Price Mode Toggle */}
+                        <div className="grid grid-cols-2 gap-1.5 bg-slate-100 dark:bg-black/20 p-1 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => updateItemRow(index, { priceMode: 'total' })}
+                            className={`py-1 rounded-lg text-[9.5px] font-black ${item.priceMode === 'total' ? 'bg-[#052659] text-white' : 'text-slate-500'}`}
+                          >
+                            Total Price
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => updateItemRow(index, { priceMode: 'per_pack' })}
+                            className={`py-1 rounded-lg text-[9.5px] font-black ${item.priceMode === 'per_pack' ? 'bg-[#052659] text-white' : 'text-slate-500'}`}
+                          >
+                            Per Pack
+                          </button>
+                        </div>
+
+                        {/* Price, Qty & Unit */}
+                        <div className="grid grid-cols-12 gap-2">
+                          <div className="col-span-5">
+                            <input 
+                              type="text"
+                              required
+                              placeholder="Price"
+                              className="w-full h-9 px-2.5 rounded-xl bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 text-xs font-mono font-bold text-slate-800 dark:text-white"
+                              value={item.displayPrice}
+                              onChange={e => handleItemPriceChange(index, e.target.value)}
+                            />
+                          </div>
+
+                          <div className="col-span-3">
+                            <input 
+                              type="number"
+                              min="1"
+                              step="any"
+                              required
+                              placeholder="Qty"
+                              className="w-full h-9 px-2 rounded-xl bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 text-xs font-mono font-bold text-center text-slate-800 dark:text-white"
+                              value={item.quantity || ''}
+                              onChange={e => updateItemRow(index, { quantity: parseFloat(e.target.value) || 1 })}
+                            />
+                          </div>
+
+                          <div className="col-span-4">
+                            <select 
+                              className="w-full h-9 px-2 rounded-xl bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 text-[9.5px] font-black uppercase text-slate-800 dark:text-white"
+                              value={item.unit}
+                              onChange={e => updateItemRow(index, { unit: e.target.value })}
+                            >
+                              <option value="UNIT">UNIT</option>
+                              <option value="ml">ml</option>
+                              <option value="g">g</option>
+                              <option value="pcs">pcs</option>
+                              <option value="BOX">BOX</option>
+                              <option value="PACK">PACK</option>
+                              <option value="KG">KG</option>
+                              <option value="BAG">BAG</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <input 
+                          type="text"
+                          placeholder="Item remark / note..."
+                          className="w-full h-8 px-2.5 rounded-lg bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 text-[10px] text-slate-800 dark:text-white"
+                          value={item.remark}
+                          onChange={e => updateItemRow(index, { remark: e.target.value })}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 💳 SECTION 4: ສະຫຼຸບຍອດ & ບັນທຶກ (SUMMARY & COMMIT) */}
+              <div className="space-y-4">
+                <div className="p-4 bg-gradient-to-br from-[#052659] to-[#073069] text-white rounded-2xl flex justify-between items-center shadow-lg">
+                  <div>
+                    <p className="text-[9.5px] font-black uppercase tracking-widest text-[#7eb3ea]">
+                      {i18n.language === 'la' ? 'ຍອດລວມທັງໝົດຂອງໃບບິນ' : 'Grand Bill Total (LAK)'}
+                    </p>
+                    <p className="text-2xl font-black font-mono tracking-tight mt-0.5">
+                      {Math.round(grandTotalLAK).toLocaleString()} ₭
+                    </p>
+                    <p className="text-[9.5px] text-blue-200/70 font-mono mt-0.5">
+                      {billItems.length} {billItems.length > 1 ? 'items' : 'item'} • {generatedBillNo}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[9px] font-mono font-bold px-2.5 py-1 bg-white/10 rounded-lg">
+                      {paymentMethod} • {category}
+                    </span>
+                  </div>
+                </div>
+
+                <button 
+                  type="submit" 
+                  disabled={saveLoading}
+                  className="w-full h-12 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-white font-black text-xs uppercase tracking-wider rounded-2xl transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {saveLoading ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  ) : (
+                    <Save className="w-4 h-4" />
+                  )}
+                  <span>{saveLoading ? 'SAVING...' : `ບັນທຶກບິນຈັດຊື້ (${generatedBillNo})`}</span>
+                </button>
+              </div>
+
+            </form>
+          </div>
         </div>
 
-        {/* RIGHT: LEDGER TABLE (7 Cols) */}
+        {/* RIGHT: PRICING & PROCUREMENT INDEX FEED (7 Cols) */}
         <div className="xl:col-span-7 space-y-6">
 
           <div className="high-density-card p-0 flex flex-col min-h-[550px] overflow-hidden bg-white dark:bg-[#073069] border border-slate-200/80 dark:border-white/10 shadow-xl rounded-3xl">
             
-            <div className="p-4 border-b border-slate-100 dark:border-white/5 flex flex-wrap justify-between items-center gap-2">
-              <div className="flex items-center gap-2">
-                <input 
-                  type="date" 
-                  value={viewDate}
-                  onChange={e => setViewDate(e.target.value)}
-                  className="text-xs font-bold bg-transparent outline-none cursor-pointer text-slate-800 dark:text-white"
-                />
-                <span className="text-[10px] text-slate-400 font-bold uppercase">({dailyTransactions.length} logs)</span>
+            <div className="p-4 border-b border-slate-100 dark:border-white/5 flex flex-wrap justify-between items-center gap-3 sticky top-0 z-10 backdrop-blur-md">
+              <div className="flex items-center gap-3">
+                <h3 className="text-xs font-black uppercase text-slate-800 dark:text-white">
+                  {t('active_pricing_index')} (COGS Records)
+                </h3>
+                <button 
+                  onClick={handleExport}
+                  className="flex items-center gap-1 text-[9px] font-black uppercase text-blue-500 hover:text-blue-600 transition-colors"
+                >
+                  <Download className="w-3 h-3" />
+                  Excel
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center gap-1 border border-slate-200 dark:border-white/10 p-1 bg-white dark:bg-slate-800 rounded-xl">
+                  <input 
+                    type="date" 
+                    value={selectedFilterDate}
+                    onChange={e => setSelectedFilterDate(e.target.value)}
+                    className="text-[10px] font-bold font-mono py-0.5 px-1 outline-none bg-transparent text-slate-800 dark:text-white"
+                  />
+                  {selectedFilterDate && (
+                    <button 
+                      type="button"
+                      onClick={() => setSelectedFilterDate('')}
+                      className="px-1.5 py-0.5 text-[8px] font-black uppercase bg-red-50 text-red-500 rounded-md"
+                    >
+                      All
+                    </button>
+                  )}
+                </div>
+
+                <div className="relative">
+                  <input 
+                    type="text" 
+                    placeholder="Search item, #bill..." 
+                    className="text-[10px] font-bold py-1.5 pl-7 pr-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl outline-none focus:ring-1 focus:ring-primary w-44 shadow-xs"
+                    value={filter}
+                    onChange={e => setFilter(e.target.value)}
+                  />
+                  <Search className="absolute left-2.5 top-2.5 w-3 h-3 text-slate-400" />
+                </div>
               </div>
             </div>
 
-            <div className="flex-1 overflow-x-auto divide-y divide-slate-100 dark:divide-white/5">
-              {dailyTransactions.map(tx => {
-                const ch = normalizePaymentChannel(tx.source);
-                const isInc = tx.type === 'income';
+            <div className="flex-1 overflow-x-auto">
+              <table className="w-full text-left">
+                <thead className="text-[9px] font-bold uppercase tracking-wider text-slate-400 dark:text-blue-200/40 bg-slate-100/50 dark:bg-white/5">
+                  <tr>
+                    <th className="p-3.5">Bill No / Date</th>
+                    <th className="p-3.5">Category</th>
+                    <th className="p-3.5">Item Name</th>
+                    <th className="p-3.5">Paid Via</th>
+                    <th className="p-3.5">Valuation (LAK)</th>
+                    <th className="p-3.5 text-center">Receipt</th>
+                    <th className="p-3.5 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-white/5 text-xs">
+                  {sortedSupplierPrices
+                    .filter(p => {
+                      const prodName = products.find(prod => prod.id === p.productId)?.name || '';
+                      const billNumber = p.billNo || '';
+                      const supplierName = p.supplier || '';
+                      const catName = p.category || '';
+                      const matchesSearch = 
+                        prodName.toLowerCase().includes(filter.toLowerCase()) || 
+                        supplierName.toLowerCase().includes(filter.toLowerCase()) ||
+                        billNumber.toLowerCase().includes(filter.toLowerCase()) ||
+                        catName.toLowerCase().includes(filter.toLowerCase());
+                      const matchesDate = !selectedFilterDate || p.date === selectedFilterDate;
+                      return matchesSearch && matchesDate;
+                    })
+                    .map(price => {
+                      const item = products.find(p => p.id === price.productId);
+                      const isNew = price.totalPriceLAK !== undefined;
+                      const totalLAK = isNew
+                        ? Number(price.totalPriceLAK || 0)
+                        : (price.currency === 'LAK' ? Number(price.priceOriginal || 0) : Number(price.priceOriginal || 0) * Number(price.exchangeRate || 1)) * (Number(price.quantity) || 1);
 
-                return (
-                  <div key={tx.id} className="p-3.5 flex justify-between items-center hover:bg-slate-50/80 dark:hover:bg-white/5 transition-all">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-1.5 h-8 rounded-full ${isInc ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
-                      <div>
-                        <p className="text-xs font-bold text-slate-800 dark:text-white">{tx.category || 'Transaction'}</p>
-                        <p className="text-[10px] text-slate-400">{tx.description || tx.time}</p>
-                      </div>
-                    </div>
+                      return (
+                        <tr key={price.id} className="hover:bg-slate-50/80 dark:hover:bg-white/5 transition-all group">
+                          
+                          {/* Bill No & Date */}
+                          <td className="p-3.5">
+                            {price.billNo && (
+                              <span className="px-1.5 py-0.5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded text-[9px] font-mono font-bold block mb-0.5 w-fit">
+                                {price.billNo}
+                              </span>
+                            )}
+                            <span className="text-[11px] font-bold text-slate-800 dark:text-white block">
+                              {price.date || format(price.createdAt?.toDate() || new Date(), 'dd/MM/yyyy')}
+                            </span>
+                          </td>
 
-                    <div className="flex items-center gap-4">
-                      <span className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase ${
-                        ch === 'Cash' ? 'bg-emerald-500/10 text-emerald-600' : ch === 'Onepay' ? 'bg-red-500/10 text-red-500' : 'bg-blue-500/10 text-blue-600'
-                      }`}>
-                        {ch}
-                      </span>
+                          {/* Category Badge */}
+                          <td className="p-3.5">
+                            <span className="px-2 py-0.5 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-white rounded-md text-[9px] font-black uppercase">
+                              {price.category || 'purchasing'}
+                            </span>
+                          </td>
 
-                      <div className="text-right">
-                        <p className={`text-xs font-mono font-black ${isInc ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
-                          {showPrivacy ? '••••••' : `${isInc ? '+' : '-'}${Number(tx.amount).toLocaleString()} ₭`}
-                        </p>
-                      </div>
+                          {/* Product / Supplier */}
+                          <td className="p-3.5">
+                            <span className="text-[11px] font-bold text-slate-800 dark:text-blue-300 block">
+                              {item?.name || 'Item'}
+                            </span>
+                            <span className="text-[9px] text-slate-400 uppercase">
+                              {price.supplier} • {price.quantity} {price.unit || 'UNIT'}
+                            </span>
+                          </td>
 
-                      <div className="flex gap-1">
-                        <button onClick={() => startEdit(tx)} className="p-1.5 text-slate-400 hover:text-blue-500 cursor-pointer">
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={() => startDelete(tx)} className="p-1.5 text-slate-400 hover:text-red-500 cursor-pointer">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
+                          {/* Payment Method */}
+                          <td className="p-3.5">
+                            <span className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase ${
+                              price.paymentMethod === 'Cash' 
+                                ? 'bg-emerald-500/10 text-emerald-600' 
+                                : price.paymentMethod === 'Onepay' 
+                                  ? 'bg-red-500/10 text-red-500' 
+                                  : 'bg-blue-500/10 text-blue-500'
+                            }`}>
+                              {price.paymentMethod || 'Cash'}
+                            </span>
+                          </td>
 
-              {dailyTransactions.length === 0 && (
-                <div className="p-12 text-center text-slate-400 text-xs font-bold uppercase tracking-widest">
-                  No records for this date
-                </div>
-              )}
+                          {/* Valuation */}
+                          <td className="p-3.5">
+                            <span className="text-[11px] font-mono font-black text-slate-900 dark:text-white block">
+                              {Math.round(totalLAK).toLocaleString()} ₭
+                            </span>
+                          </td>
+
+                          {/* Receipt */}
+                          <td className="p-3.5 text-center">
+                            {price.billImageUrl ? (
+                              <button
+                                type="button"
+                                onClick={() => setPreviewImageUrl(price.billImageUrl)}
+                                className="p-1 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-lg cursor-pointer"
+                                title="View Receipt"
+                              >
+                                <ImageIcon className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <span className="text-slate-300">-</span>
+                            )}
+                          </td>
+
+                          {/* Action */}
+                          <td className="p-3.5 text-right">
+                            <div className="flex gap-1 justify-end opacity-0 group-hover:opacity-100 transition-all">
+                              <button 
+                                onClick={() => {
+                                  setEditingPriceId(price.id);
+                                  setEditPriceData({
+                                    ...price,
+                                    date: price.date || format(new Date(), 'yyyy-MM-dd'),
+                                    unit: price.unit || item?.unit || 'UNIT'
+                                  });
+                                }}
+                                className="p-1.5 text-slate-400 hover:text-blue-500"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setApprovalType('delete');
+                                  setPendingAction(price.id);
+                                  setShowApprovalModal(true);
+                                }}
+                                className="p-1.5 text-slate-400 hover:text-red-500"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
             </div>
-
           </div>
-
         </div>
 
       </div>
 
-      <PinModal
-        isOpen={showEditPinModal}
-        onClose={() => setShowEditPinModal(false)}
-        correctPin={appConfig?.masterApprovalPin}
-        onSuccess={handleEditConfirmed}
-      />
+      {/* ================= MODALS ================= */}
+      {previewImageUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-[#073069] w-full max-w-2xl rounded-3xl p-6 shadow-2xl border border-white/10 flex flex-col space-y-4 max-h-[90vh]">
+            <div className="flex justify-between items-center border-b border-slate-100 dark:border-white/10 pb-3">
+              <h4 className="text-sm font-black text-slate-800 dark:text-white uppercase flex items-center gap-2">
+                <ImageIcon className="w-4 h-4 text-emerald-500" />
+                <span>Attached Receipt View</span>
+              </h4>
+              <button type="button" onClick={() => setPreviewImageUrl(null)}>
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto rounded-2xl bg-black/5 flex items-center justify-center p-2">
+              <img src={previewImageUrl} alt="Receipt Preview" className="max-h-[70vh] w-auto object-contain rounded-xl" />
+            </div>
+          </div>
+        </div>
+      )}
 
-      <PinModal
-        isOpen={showDeletePinModal}
-        onClose={() => setShowDeletePinModal(false)}
-        correctPin={appConfig?.masterApprovalPin}
-        onSuccess={handleDeleteConfirmed}
-      />
+      {/* Product Manager */}
+      {showProductManager && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-[#073069] w-full max-w-lg rounded-3xl p-6 shadow-2xl border border-white/10 flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-black text-slate-800 dark:text-white uppercase">Catalog Items</h3>
+              <button type="button" onClick={() => setShowProductManager(false)}>
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {products.map(p => (
+                <div key={p.id} className="p-3 bg-slate-50 dark:bg-white/5 rounded-2xl flex items-center justify-between group">
+                  <div className="flex-1 mr-2">
+                    {editingProduct?.id === p.id ? (
+                      <div className="flex gap-2">
+                        <input 
+                          className="flex-1 h-8 px-2 rounded-lg bg-white dark:bg-[#073069] border text-xs font-bold"
+                          value={editProductName}
+                          onChange={e => setEditProductName(e.target.value)}
+                        />
+                        <button type="button" onClick={async () => {
+                          await updateDoc(doc(db, 'products', p.id), { name: editProductName.trim(), unit: editProductUnit.trim() || 'UNIT' });
+                          setEditingProduct(null);
+                        }} className="p-1.5 bg-emerald-500 text-white rounded-lg">
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                        <button type="button" onClick={() => setEditingProduct(null)} className="p-1.5 bg-slate-200 dark:bg-white/10 rounded-lg">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-xs font-bold text-slate-800 dark:text-white">{p.name}</p>
+                        <p className="text-[9px] text-slate-400 uppercase">{p.unit || 'UNIT'}</p>
+                      </div>
+                    )}
+                  </div>
+                  {editingProduct?.id !== p.id && (
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100">
+                      <button onClick={() => { setEditingProduct(p); setEditProductName(p.name); setEditProductUnit(p.unit || ''); }} className="p-1.5 text-blue-500">
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={async () => {
+                        if (confirm('Delete product?')) await deleteDoc(doc(db, 'products', p.id));
+                      }} className="p-1.5 text-red-500">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
