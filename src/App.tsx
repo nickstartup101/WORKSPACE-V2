@@ -21,7 +21,6 @@ import {
   Sparkles,
   Store,
   MapPin,
-  Users,
   ChevronLeft,
   ChevronRight,
   CheckCircle
@@ -39,24 +38,23 @@ import Financials from './components/Financials';
 import Settings from './components/Settings';
 import PinModal from './components/PinModal';
 import ProcurementPlanner from './components/ProcurementPlanner';
-import HR from './components/HR';
 
 // Premium Text Logo Component
 const TextLogo = ({ centered = false, dark = false, name = "La Dolce" }: { centered?: boolean, dark?: boolean, name?: string | null }) => (
   <div className={`flex flex-col ${centered ? 'items-center text-center' : 'items-start text-left'} gap-2 group`}>
-    <h1 className={`text-5xl font-alice tracking-tight leading-none ${dark ? 'text-white' : 'text-[#1E1B4B] dark:text-white'}`}>
+    <h1 className={`text-5xl font-alice tracking-tight leading-none ${dark ? 'text-white' : 'text-[#052659] dark:text-white'}`}>
       {name || "La Dolce"}
     </h1>
     
     <div className="flex items-center justify-center gap-3 w-full">
-      <div className={`h-[1px] flex-1 min-w-[12px] opacity-20 ${dark ? 'bg-white' : 'bg-[#1E1B4B]'}`}></div>
-      <span className={`text-[9px] font-sans font-black uppercase tracking-[0.5em] ${dark ? 'text-white/60' : 'text-[#1E1B4B]/60 dark:text-white/40'}`}>
+      <div className={`h-[1px] flex-1 min-w-[12px] opacity-20 ${dark ? 'bg-white' : 'bg-[#052659]'}`}></div>
+      <span className={`text-[9px] font-sans font-black uppercase tracking-[0.5em] ${dark ? 'text-white/60' : 'text-[#052659]/60 dark:text-white/40'}`}>
         Workspace
       </span>
-      <div className={`h-[1px] flex-1 min-w-[12px] opacity-20 ${dark ? 'bg-white' : 'bg-[#1E1B4B]'}`}></div>
+      <div className={`h-[1px] flex-1 min-w-[12px] opacity-20 ${dark ? 'bg-white' : 'bg-[#052659]'}`}></div>
     </div>
     
-    <div className={`text-[8px] font-sans font-bold uppercase tracking-[0.8em] opacity-30 mt-1 ${dark ? 'text-white' : 'text-[#1E1B4B] dark:text-white'}`}>
+    <div className={`text-[8px] font-sans font-bold uppercase tracking-[0.8em] opacity-30 mt-1 ${dark ? 'text-white' : 'text-[#052659] dark:text-white'}`}>
        estd 2026
     </div>
   </div>
@@ -113,7 +111,6 @@ export default function App() {
     const verifyBillParam = params.get('verifyBill');
     if (verifyBillParam) {
       try {
-        // Safe base64 decoding with support for UTF-8
         const decoded = decodeURIComponent(escape(atob(verifyBillParam)));
         const parsed = JSON.parse(decoded);
         setScannedBillData(parsed);
@@ -145,7 +142,6 @@ export default function App() {
       if (isDemoLocalRef.current) return;
       setUser(u);
       
-      // Cleanup previous listeners
       if (settingsUnsubscribe) {
         settingsUnsubscribe();
         settingsUnsubscribe = null;
@@ -156,13 +152,11 @@ export default function App() {
       }
 
       if (u) {
-        // Listen to app config
         const configRef = doc(db, 'settings', 'appConfig');
         const configUnsub = onSnapshot(configRef, (snap) => {
           if (snap.exists()) setAppConfig(snap.data());
         });
 
-        // Listen to admin role
         const adminRef = doc(db, 'admins', u.uid);
         adminUnsubscribe = onSnapshot(adminRef, (snap) => {
           if (snap.exists()) {
@@ -172,7 +166,6 @@ export default function App() {
           }
         });
 
-        // Listen to user settings for PIN
         const settingsRef = doc(db, 'users', u.uid, 'settings', 'main');
         settingsUnsubscribe = onSnapshot(settingsRef, (snap) => {
           if (snap.exists()) {
@@ -181,16 +174,13 @@ export default function App() {
             setUserSettings({});
           }
         }, (error) => {
-          // Only handle error if we are still logged in
           if (auth.currentUser) {
             handleFirestoreError(error, OperationType.GET, `users/${u.uid}/settings/main`);
           }
         });
 
-        // Listen for remote approval requests if super admin
         let approvalUnsub: (() => void) | null = null;
         if (FOUNDING_ADMINS.includes(u.email?.toLowerCase() || '')) {
-          // Simplified query to avoid index issues and show all pending regardless of time
           const q = query(
             collection(db, 'approval_requests'),
             where('status', '==', 'pending'),
@@ -234,15 +224,12 @@ export default function App() {
     }
   }, [isDarkMode]);
 
-  // Activity tracking for idle timeout
   useEffect(() => {
     const updateActivity = () => setLastActivity(Date.now());
     
-    // Track various user interactions
     const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
     events.forEach(name => document.addEventListener(name, updateActivity));
 
-    // Check timer every 10 seconds
     const interval = setInterval(() => {
       const now = Date.now();
       const idleTime = now - lastActivity;
@@ -278,6 +265,7 @@ export default function App() {
       }
     }
   };
+
   const startLocalDemoMode = () => {
     setIsDemoLocal(true);
     setUser({
@@ -343,13 +331,11 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-[#1E1B4B] p-4 text-center relative overflow-hidden">
-        {/* Background decorative elements */}
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#052659] p-4 text-center relative overflow-hidden">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-400/20 rounded-full blur-[120px] animate-pulse"></div>
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-600/20 rounded-full blur-[120px] animate-pulse"></div>
         
         <div className="glass-card max-w-lg w-full space-y-12 animate-in fade-in zoom-in duration-1000 py-20 px-10 border-slate-200 dark:border-white/5 shadow-2xl relative overflow-hidden">
-          {/* Subtle geometric accent */}
           <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 rounded-full -mr-16 -mt-16 blur-3xl"></div>
           
           <TextLogo centered={true} name={appConfig?.shopName || userSettings?.shopName} />
@@ -391,7 +377,7 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex items-center justify-center gap-4 text-[#1E1B4B]/30 dark:text-white/20">
+            <div className="flex items-center justify-center gap-4 text-[#052659]/30 dark:text-white/20">
               <div className="h-[1px] flex-1 bg-current"></div>
               <p className="text-[9px] font-black uppercase tracking-[0.3em] whitespace-nowrap">{t('shop_architecture')}</p>
               <div className="h-[1px] flex-1 bg-current"></div>
@@ -399,7 +385,7 @@ export default function App() {
             
             <button 
               onClick={login}
-              className="crystal-button w-full h-16 flex items-center justify-center gap-4 text-[11px] shadow-none border border-[#1E1B4B]/10 dark:border-white/10"
+              className="crystal-button w-full h-16 flex items-center justify-center gap-4 text-[11px] shadow-none border border-[#052659]/10 dark:border-white/10"
             >
               <Globe className="w-5 h-5 opacity-50" />
               <span className="tracking-[0.2em]">{t('sign_in_google')}</span>
@@ -428,10 +414,10 @@ export default function App() {
     );
   }
 
+  // ✅ Navigation Items without HR
   const navItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: t('dashboard') },
     { id: 'suppliers', icon: Truck, label: t('suppliers') },
-    { id: 'hr', icon: Users, label: i18n.language === 'la' ? 'ຄຸ້ມຄອງບຸກຄະລາກອນ (HR)' : 'Staffing / HR' },
     { id: 'planner', icon: Sparkles, label: i18n.language === 'la' ? 'ແຜນຈັດຊື້ & ບິນ' : 'Auto-Bill Planner' },
     { id: 'financials', icon: Wallet, label: t('financials'), isSensitive: true },
     { id: 'settings', icon: SettingsIcon, label: t('settings') },
@@ -482,7 +468,7 @@ export default function App() {
 
       {/* Sidebar */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 bg-[#1E1B4B] text-white transition-all duration-300 flex flex-col h-screen
+        fixed inset-y-0 left-0 z-50 bg-[#052659] text-white transition-all duration-300 flex flex-col h-screen
         ${isSidebarCollapsed ? 'lg:w-20' : 'lg:w-60'} w-56
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
       `}>
@@ -539,7 +525,6 @@ export default function App() {
           </div>
           
           <div className={`flex ${isSidebarCollapsed ? 'flex-col items-center' : 'items-center'} gap-2`}>
-            {/* Collapse toggle */}
             <button
               onClick={toggleSidebarCollapse}
               className="hidden lg:flex items-center justify-center p-2 text-white/40 hover:text-white hover:bg-white/5 rounded-xl transition-all"
@@ -567,13 +552,13 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Desktop sidebar spacer to prevent fixed sidebar from overlapping content */}
+      {/* Desktop sidebar spacer */}
       <div className={`hidden lg:block transition-all duration-300 shrink-0 ${isSidebarCollapsed ? 'w-20' : 'w-60'}`} />
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 bg-transparent overflow-hidden">
         {/* Top bar */}
-        <header className="h-14 bg-[#1E1B4B] text-white border-b border-white/10 px-4 lg:px-6 flex items-center justify-between sticky top-0 z-40 shadow-md">
+        <header className="h-14 bg-[#052659] text-white border-b border-white/10 px-4 lg:px-6 flex items-center justify-between sticky top-0 z-40 shadow-md">
           <div className="flex items-center gap-4">
             <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden p-2 hover:bg-white/10 rounded-lg">
               <Menu className="w-5 h-5 text-white" />
@@ -605,7 +590,7 @@ export default function App() {
                  </span>
                  <span className="text-[8px] opacity-40">▼</span>
                </button>
-               <div className="absolute right-0 mt-1 w-48 bg-white dark:bg-[#2D2A6E] border border-slate-100 dark:border-white/10 rounded-2xl shadow-xl py-2 hidden group-hover:block hover:block animate-in fade-in slide-in-from-top-1 duration-200 z-50 text-slate-800 dark:text-white">
+               <div className="absolute right-0 mt-1 w-48 bg-white dark:bg-[#073069] border border-slate-100 dark:border-white/10 rounded-2xl shadow-xl py-2 hidden group-hover:block hover:block animate-in fade-in slide-in-from-top-1 duration-200 z-50 text-slate-800 dark:text-white">
                  <p className="px-4 py-1.5 text-[8px] uppercase tracking-widest font-black text-slate-400 dark:text-blue-300/40 border-b border-slate-50 dark:border-white/5 mb-1">
                    {i18n.language === 'la' ? 'ເລືອກສາຂາຈັດການ' : 'Select Branch'}
                  </p>
@@ -665,11 +650,10 @@ export default function App() {
         </header>
 
         {/* Dynamic Section Container */}
-        <div className="flex-1 p-4 lg:p-6 overflow-y-auto bg-gradient-to-br from-[#f8fafc] to-[#f1f5f9] dark:from-[#1E1B4B] dark:to-[#2D2A6E]">
+        <div className="flex-1 p-4 lg:p-6 overflow-y-auto bg-gradient-to-br from-[#f8fafc] to-[#f1f5f9] dark:from-[#052659] dark:to-[#073069]">
            <div className="max-w-7xl mx-auto space-y-6">
              {activeTab === 'dashboard' && <Dashboard userSettings={userSettings} user={user} selectedBranch={selectedBranch} />}
              {activeTab === 'suppliers' && <Suppliers />}
-             {activeTab === 'hr' && <HR selectedBranch={selectedBranch} userSettings={userSettings} />}
              {activeTab === 'planner' && <ProcurementPlanner selectedBranch={selectedBranch} />}
              {activeTab === 'financials' && <Financials appConfig={appConfig} selectedBranch={selectedBranch} />}
              {activeTab === 'settings' && <Settings user={user} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} userSettings={userSettings} isSuperAdmin={isSuperAdmin} appConfig={appConfig} selectedBranch={selectedBranch} />}
@@ -686,11 +670,9 @@ export default function App() {
                 exit={{ opacity: 0, scale: 0.95, y: 20 }}
                 className="bg-white dark:bg-slate-900 text-slate-850 dark:text-white border border-slate-100 dark:border-white/10 rounded-[2.5rem] p-6 md:p-8 max-w-md w-full shadow-2xl relative overflow-hidden"
               >
-                {/* Decorative secure grid pattern */}
                 <div className="absolute top-0 left-0 w-full h-32 bg-emerald-500/10 dark:bg-emerald-500/5 -z-10 blur-xl"></div>
                 
                 <div className="flex flex-col items-center text-center space-y-4">
-                  {/* Verified Icon Badge */}
                   <div className="w-16 h-16 bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center shadow-lg relative border border-emerald-500/20">
                     <CheckCircle className="w-9 h-9" />
                     <span className="absolute -top-1 -right-1 flex h-3 w-3">
@@ -770,7 +752,6 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        // Clear param from URL without page refresh
                         const newUrl = window.location.origin + window.location.pathname;
                         window.history.replaceState({}, document.title, newUrl);
                         setScannedBillData(null);
@@ -803,28 +784,28 @@ export default function App() {
               exit={{ y: -100, opacity: 0 }}
               className="fixed top-0 left-1/2 -translate-x-1/2 z-[200] w-[95%] max-w-sm"
             >
-              <div className="bg-white dark:bg-[#3730A3] text-slate-900 dark:text-white p-6 rounded-[2.5rem] shadow-[0_30px_60px_rgba(30,27,75,0.2)] border border-[#1E1B4B]/5 flex flex-col gap-4 backdrop-blur-xl relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-32 h-32 bg-[#1E1B4B]/5 rounded-full -mr-16 -mt-16"></div>
+              <div className="bg-white dark:bg-[#0a3a82] text-slate-900 dark:text-white p-6 rounded-[2.5rem] shadow-[0_30px_60px_rgba(5,38,89,0.2)] border border-[#052659]/5 flex flex-col gap-4 backdrop-blur-xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-32 h-32 bg-[#052659]/5 rounded-full -mr-16 -mt-16"></div>
                 
                 <div className="flex items-center gap-4 relative z-10">
-                  <div className="w-14 h-14 bg-[#1E1B4B]/5 dark:bg-white/10 rounded-2xl flex items-center justify-center flex-shrink-0 relative">
-                     <ShieldAlert className="w-7 h-7 text-[#1E1B4B] dark:text-blue-300" />
+                  <div className="w-14 h-14 bg-[#052659]/5 dark:bg-white/10 rounded-2xl flex items-center justify-center flex-shrink-0 relative">
+                     <ShieldAlert className="w-7 h-7 text-[#052659] dark:text-blue-300" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-[#1E1B4B]/40 dark:text-blue-300/40 mb-1">Awaiting Approval</p>
-                    <p className="text-sm font-black tracking-tight leading-none mb-1 text-[#1E1B4B] dark:text-white">{activeApprovalRequest.type?.toUpperCase()}</p>
+                    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-[#052659]/40 dark:text-blue-300/40 mb-1">Awaiting Approval</p>
+                    <p className="text-sm font-black tracking-tight leading-none mb-1 text-[#052659] dark:text-white">{activeApprovalRequest.type?.toUpperCase()}</p>
                     <p className="text-[9px] font-bold opacity-40 truncate">FROM: {activeApprovalRequest.requestedByEmail}</p>
                   </div>
                 </div>
 
                 {activeApprovalRequest.data && (
                   <div className="bg-slate-50 dark:bg-black/20 p-4 rounded-2xl border border-slate-100 dark:border-white/5 relative z-10 animate-in fade-in zoom-in duration-300">
-                    <p className="text-[9px] font-black uppercase tracking-widest text-[#1E1B4B]/30 dark:text-white/20 mb-2">Request Details</p>
+                    <p className="text-[9px] font-black uppercase tracking-widest text-[#052659]/30 dark:text-white/20 mb-2">Request Details</p>
                     <div className="space-y-1">
                       {Object.entries(activeApprovalRequest.data).map(([key, value]) => (
                         <div key={key} className="flex justify-between text-[11px]">
-                          <span className="font-bold uppercase text-[#1E1B4B]/60 dark:text-white/40">{key}:</span>
-                          <span className="font-black text-[#1E1B4B] dark:text-white">{String(value)}</span>
+                          <span className="font-bold uppercase text-[#052659]/60 dark:text-white/40">{key}:</span>
+                          <span className="font-black text-[#052659] dark:text-white">{String(value)}</span>
                         </div>
                       ))}
                     </div>
@@ -837,7 +818,6 @@ export default function App() {
                       try {
                         const ref = doc(db, 'approval_requests', activeApprovalRequest.id);
                         
-                        // Execute the action directly if it's a simple one (like delete)
                         if (activeApprovalRequest.type === 'delete' && activeApprovalRequest.data?.id) {
                           try {
                             await deleteDoc(doc(db, 'supplierPrices', activeApprovalRequest.data.id));
@@ -857,7 +837,7 @@ export default function App() {
                         alert("Permission denied or connection error");
                       }
                     }}
-                    className="flex-1 h-14 bg-[#1E1B4B] hover:bg-[#2D2A6E] text-white rounded-2xl flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-95 transition-all shadow-lg font-black uppercase tracking-widest text-[11px]"
+                    className="flex-1 h-14 bg-[#052659] hover:bg-[#073069] text-white rounded-2xl flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-95 transition-all shadow-lg font-black uppercase tracking-widest text-[11px]"
                   >
                     <Check className="w-5 h-5" />
                     Approve
@@ -877,7 +857,7 @@ export default function App() {
                         alert("Permission denied or connection error");
                       }
                     }}
-                    className="w-14 h-14 bg-white dark:bg-white/5 border border-[#1E1B4B]/10 text-[#1E1B4B] dark:text-white rounded-2xl flex items-center justify-center hover:bg-slate-50 dark:hover:bg-white/10 hover:scale-[1.02] active:scale-95 transition-all shadow-sm"
+                    className="w-14 h-14 bg-white dark:bg-white/5 border border-[#052659]/10 text-[#052659] dark:text-white rounded-2xl flex items-center justify-center hover:bg-slate-50 dark:hover:bg-white/10 hover:scale-[1.02] active:scale-95 transition-all shadow-sm"
                   >
                     <X className="w-6 h-6" />
                   </button>
