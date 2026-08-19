@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, Component, ErrorInfo, ReactNode } from 'react';
 import { auth, db, storage, handleFirestoreError, OperationType } from '../firebase';
 import { 
   collection, addDoc, onSnapshot, query, 
@@ -9,10 +9,11 @@ import imageCompression from 'browser-image-compression';
 import { format, subDays } from 'date-fns';
 import { utils, writeFile } from 'xlsx';
 import { 
-  Upload, PlusCircle, Download, BarChart3, Eye, EyeOff, X, Trash2, 
-  Sparkles, Wallet, CreditCard, Building2, TrendingUp, DollarSign, 
-  Calendar, Filter, PieChart, Percent, ArrowUpRight, ArrowDownRight, Tag,
-  Image as ImageIcon, Edit3
+  Upload, PlusCircle, ArrowUpCircle, ArrowDownCircle, Download, BarChart3, 
+  Eye, EyeOff, X, Trash2, Sparkles, Wallet, CreditCard, Building2, 
+  TrendingUp, DollarSign, Calendar, Filter, PieChart, Percent, 
+  ArrowUpRight, ArrowDownRight, Tag, Image as ImageIcon, Edit3, 
+  Split, CheckCircle2, AlertCircle
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { 
@@ -23,7 +24,44 @@ import PinModal from './PinModal';
 
 export type PaymentChannel = 'Cash' | 'Onepay' | 'LDB';
 
-// 🛡️ 1. SAFE DATE NORMALIZER (ຮອງຮັບທຸກຮູບແບບວັນທີ String, Timestamp, Date)
+// 🛡️ Error Boundary
+class FinancialsErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: '' };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error: error.message };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Financials Error caught:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-8 bg-white dark:bg-[#073069] rounded-3xl border border-red-500/20 shadow-2xl text-center space-y-4 max-w-lg mx-auto my-10">
+          <div className="w-12 h-12 bg-red-500/10 text-red-500 rounded-full flex items-center justify-center mx-auto">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <h3 className="text-base font-black uppercase text-slate-800 dark:text-white">ພົບຂໍ້ຜິດພາດໃນການສະແດງຜົນ</h3>
+          <p className="text-xs text-slate-400 font-mono">{this.state.error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-6 py-2.5 bg-primary text-white rounded-xl font-bold text-xs uppercase cursor-pointer"
+          >
+            ຣີເຟຣຊໜ້າໃໝ່ (Reload)
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// 🛡️ Safe Date Normalizer
 const toStandardDateString = (raw: any): string => {
   if (!raw) return '';
   if (typeof raw === 'string') {
@@ -60,7 +98,7 @@ const toStandardDateString = (raw: any): string => {
   return '';
 };
 
-// 🛡️ 2. SAFE NUMBER PARSER (ປ້ອງກັນ NaN ຫຼື String ຕິດຈຸດ)
+// 🛡️ Safe Number Parser
 const parseAmount = (val: any): number => {
   if (!val) return 0;
   if (typeof val === 'number') return isNaN(val) ? 0 : val;
@@ -69,27 +107,35 @@ const parseAmount = (val: any): number => {
   return isNaN(num) ? 0 : num;
 };
 
-export default function Financials({ appConfig, selectedBranch }: { appConfig: any, selectedBranch?: string }) {
+function FinancialsContent({ appConfig, selectedBranch }: { appConfig: any, selectedBranch?: string }) {
   const { t, i18n } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // In-App Toast
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2500);
+  };
 
   // Core Data States
   const [allTransactions, setAllTransactions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showPrivacy, setShowPrivacy] = useState(false);
 
-  // Timeframe View Mode: 'month' vs 'all'
+  // Timeframe View Mode
   const [timeframeMode, setTimeframeMode] = useState<'month' | 'all'>('month');
 
   // Date View State
   const [viewDate, setViewDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [showAllMonthRecords, setShowAllMonthRecords] = useState(false);
 
-  // Drag & Drop State for Receipts
+  // Drag & Drop State
   const [isDraggingReceipt, setIsDraggingReceipt] = useState(false);
   const [previewReceiptModalUrl, setPreviewReceiptModalUrl] = useState<string | null>(null);
 
-  // Bank Opening Balance Modal State
+  // Bank Modal State
   const [showBankModal, setShowBankModal] = useState(false);
   const [bankAmount, setBankAmount] = useState(0);
   const [bankChannel, setBankChannel] = useState<PaymentChannel>('Onepay');
@@ -97,13 +143,24 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   const [approvalType, setApprovalType] = useState<'transaction' | 'bank' | null>(null);
   const todayStr = format(new Date(), 'yyyy-MM-dd');
 
-  // Transaction Form State
+  // Multi-Channel Split Income State with Auto-Comma Display
+  const [channelMode, setChannelMode] = useState<'single' | 'split'>('single');
+  const [splitCashAmount, setSplitCashAmount] = useState<number>(0);
+  const [displaySplitCash, setDisplaySplitCash] = useState<string>('');
+  
+  const [splitOnepayAmount, setSplitOnepayAmount] = useState<number>(0);
+  const [displaySplitOnepay, setDisplaySplitOnepay] = useState<string>('');
+
+  const [splitLdbAmount, setSplitLdbAmount] = useState<number>(0);
+  const [displaySplitLdb, setDisplaySplitLdb] = useState<string>('');
+
+  // Form State
   const [formData, setFormData] = useState({
-    type: 'expense' as 'income' | 'expense',
+    type: 'income' as 'income' | 'expense',
     amount: 0,
-    category: 'Purchasing',
+    category: 'Sales',
     description: '',
-    source: 'Cash' as PaymentChannel,
+    source: 'Onepay' as PaymentChannel,
     receipt: null as File | null,
     receiptPreviewUrl: '' as string,
     date: format(new Date(), 'yyyy-MM-dd'),
@@ -112,10 +169,10 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
 
   const [displayAmount, setDisplayAmount] = useState('');
 
-  const formatWithCommas = (val: string) => {
-    const num = val.replace(/,/g, '');
+  const formatWithCommas = (val: string | number) => {
+    const num = String(val).replace(/,/g, '');
     if (!num) return '';
-    if (isNaN(Number(num))) return displayAmount;
+    if (isNaN(Number(num))) return String(val);
     return Number(num).toLocaleString();
   };
 
@@ -124,6 +181,26 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     if (rawValue === '' || !isNaN(Number(rawValue))) {
       setDisplayAmount(formatWithCommas(e.target.value));
       setFormData(prev => ({ ...prev, amount: Number(rawValue) || 0 }));
+    }
+  };
+
+  // Split Channel Commas Handler
+  const handleSplitAmountChange = (channel: 'cash' | 'onepay' | 'ldb', rawVal: string) => {
+    const clean = rawVal.replace(/,/g, '');
+    if (clean === '' || !isNaN(Number(clean))) {
+      const formatted = formatWithCommas(rawVal);
+      const num = Number(clean) || 0;
+
+      if (channel === 'cash') {
+        setDisplaySplitCash(formatted);
+        setSplitCashAmount(num);
+      } else if (channel === 'onepay') {
+        setDisplaySplitOnepay(formatted);
+        setSplitOnepayAmount(num);
+      } else if (channel === 'ldb') {
+        setDisplaySplitLdb(formatted);
+        setSplitLdbAmount(num);
+      }
     }
   };
 
@@ -145,7 +222,6 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   const [billPaymentSources, setBillPaymentSources] = useState<{ [id: string]: PaymentChannel }>({});
   const [importingBillId, setImportingBillId] = useState<string | null>(null);
 
-  // Normalizer for payment channels
   const normalizePaymentChannel = (src?: string): PaymentChannel => {
     if (!src) return 'Cash';
     const s = String(src).toLowerCase();
@@ -158,7 +234,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   const processReceiptFile = (file: File) => {
     if (!file) return;
     if (file.size > 8 * 1024 * 1024) {
-      alert(i18n.language === 'la' ? 'ຂະໜາດໄຟລ໌ໃຫຍ່ເກີນ 8MB' : 'File is larger than 8MB.');
+      showToast(i18n.language === 'la' ? 'ຂະໜາດໄຟລ໌ໃຫຍ່ເກີນ 8MB' : 'File is larger than 8MB.', 'error');
       return;
     }
     const preview = URL.createObjectURL(file);
@@ -168,6 +244,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       receiptPreviewUrl: preview
     }));
     setDeleteReceipt(false);
+    showToast(i18n.language === 'la' ? 'ແນບຮູບໃບບິນແລ້ວ' : 'Receipt attached', 'success');
   };
 
   useEffect(() => {
@@ -235,7 +312,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     const qAll = query(collection(db, 'transactions'));
 
     const unsubscribeAll = onSnapshot(qAll, (snap) => {
-      const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const all = snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) }));
       const branchFiltered = all.filter((tx: any) => (tx.branchId || 'branch_1') === branchId);
 
       branchFiltered.sort((a: any, b: any) => {
@@ -258,10 +335,10 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   // Load products and supplierPrices
   useEffect(() => {
     const unsubPrices = onSnapshot(collection(db, 'supplierPrices'), (snap) => {
-      setSupplierPrices(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setSupplierPrices(snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) })));
     });
     const unsubProducts = onSnapshot(collection(db, 'products'), (snap) => {
-      setProducts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setProducts(snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) })));
     });
     return () => {
       unsubPrices();
@@ -277,18 +354,20 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       const [year, month] = targetDate.split('-');
       const monthPrefix = `${year}-${month}`;
       return allTransactions.filter((tx: any) => {
+        if (!tx) return false;
         const d = toStandardDateString(tx.date || tx.createdAt);
         return d.startsWith(monthPrefix);
       });
     }
 
     return allTransactions.filter((tx: any) => {
+      if (!tx) return false;
       const d = toStandardDateString(tx.date || tx.createdAt);
       return d === targetDate;
     });
   }, [allTransactions, viewDate, showAllMonthRecords]);
 
-  // 7-Day Chart computed in-memory
+  // In-Memory Weekly Chart Data
   const weeklyData = useMemo(() => {
     const standardDate = toStandardDateString(viewDate) || format(new Date(), 'yyyy-MM-dd');
     let validBase = new Date();
@@ -304,7 +383,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     return Array.from({ length: 7 }, (_, i) => {
       const dObj = subDays(validBase, 6 - i);
       const targetDate = format(dObj, 'yyyy-MM-dd');
-      const dayTxs = allTransactions.filter(tx => toStandardDateString(tx.date || tx.createdAt) === targetDate);
+      const dayTxs = allTransactions.filter(tx => tx && toStandardDateString(tx.date || tx.createdAt) === targetDate);
 
       let income = 0;
       let expenses = 0;
@@ -341,6 +420,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     const currentMonthPrefix = format(now, 'yyyy-MM');
 
     const activeList = allTransactions.filter(tx => {
+      if (!tx) return false;
       if (timeframeMode === 'all') return true;
       const dStr = toStandardDateString(tx.date || tx.createdAt);
       if (!dStr) return true;
@@ -421,7 +501,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   const importedSupplierPriceIds = useMemo(() => {
     const ids = new Set<string>();
     allTransactions.forEach((tx) => {
-      if (Array.isArray(tx.supplierPriceIds)) {
+      if (tx && Array.isArray(tx.supplierPriceIds)) {
         tx.supplierPriceIds.forEach((id: string) => ids.add(id));
       }
     });
@@ -429,7 +509,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   }, [allTransactions]);
 
   const supplierBillsForSelectedDate = useMemo(() => {
-    const selectedDatePrices = supplierPrices.filter(p => toStandardDateString(p.date) === pullDate);
+    const selectedDatePrices = supplierPrices.filter(p => p && toStandardDateString(p.date) === pullDate);
 
     const isOther = (name: string) => {
       const n = String(name || '').trim().toUpperCase();
@@ -447,6 +527,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     });
 
     const itemTotalLAK = (item: any): number => {
+      if (!item) return 0;
       if (item.totalPriceLAK !== undefined) return parseAmount(item.totalPriceLAK);
       return item.currency === 'LAK'
         ? parseAmount(item.priceOriginal) * (parseAmount(item.quantity) || 1)
@@ -514,7 +595,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       const totalAmount = Math.round(bill.totalPrice || 0);
 
       if (totalAmount <= 0) {
-        alert(i18n.language === 'la' ? 'ຍອດບິນຕ້ອງຫຼາຍກວ່າ 0 ₭' : 'Bill amount must be greater than 0');
+        showToast(i18n.language === 'la' ? 'ຍອດບິນຕ້ອງຫຼາຍກວ່າ 0 ₭' : 'Bill amount must be greater than 0', 'error');
         return;
       }
 
@@ -543,15 +624,16 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
         branchId: selectedBranch || 'branch_1'
       });
 
-      alert(i18n.language === 'la' ? 'ດຶງລາຍຈ່າຍເຂົ້າບັນຊີສຳເລັດ!' : 'Imported successfully!');
+      showToast(i18n.language === 'la' ? `ດຶງລາຍຈ່າຍ ${bill.supplier} (${selectedSource}) ສຳເລັດ!` : 'Imported successfully!', 'success');
     } catch (err: any) {
       console.error(err);
-      alert(`Error: ${err.message}`);
+      showToast(`Error: ${err.message}`, 'error');
     } finally {
       setImportingBillId(null);
     }
   };
 
+  // ⚡ ULTRA-FAST TRANSACTION SUBMISSION (PARALLEL WRITE & ZERO LAG)
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -564,41 +646,129 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       }
 
       const cleanDate = toStandardDateString(formData.date) || format(new Date(), 'yyyy-MM-dd');
+      const timeStr = formData.time || format(new Date(), 'HH:mm');
 
-      const txData = {
-        type: formData.type,
-        amount: parseAmount(formData.amount),
-        category: formData.category,
-        description: formData.description,
-        source: formData.source,
-        receiptUrl,
-        date: cleanDate,
-        time: formData.time || format(new Date(), 'HH:mm'),
-        updatedAt: serverTimestamp(),
-        userId: auth.currentUser?.uid || 'admin',
-        userEmail: auth.currentUser?.email || 'admin@example.com',
-        branchId: selectedBranch || 'branch_1',
-        ...(isEditing && oldTxData?.supplierPriceIds ? { supplierPriceIds: oldTxData.supplierPriceIds } : {}),
-        ...(isEditing && oldTxData?.supplierName ? { supplierName: oldTxData.supplierName } : {})
-      };
+      // 🌟 1. PARALLEL SPLIT INCOME WRITE (Cash + OnePay + LDB)
+      if (channelMode === 'split' && !isEditing && formData.type === 'income') {
+        const cashVal = parseAmount(splitCashAmount);
+        const onepayVal = parseAmount(splitOnepayAmount);
+        const ldbVal = parseAmount(splitLdbAmount);
 
-      if (isEditing && editingId) {
-        await setDoc(doc(db, 'transactions', editingId), txData, { merge: true });
-        alert(i18n.language === 'la' ? 'ແກ້ໄຂລາຍການສຳເລັດ!' : 'Updated!');
-      } else {
-        await addDoc(collection(db, 'transactions'), {
-          ...txData,
-          createdAt: serverTimestamp()
-        });
-        alert(i18n.language === 'la' ? 'ບັນທຶກລາຍການສຳເລັດ!' : 'Saved!');
+        const totalSplit = cashVal + onepayVal + ldbVal;
+        if (totalSplit <= 0) {
+          showToast(i18n.language === 'la' ? 'ກະລຸນາປ້ອນຍອດເງິນໃນຊ່ອງທາງໃດໜຶ່ງ (Cash, OnePay, ຫຼື LDB)' : 'Please enter an amount in at least one channel.', 'error');
+          setLoading(false);
+          return;
+        }
+
+        const promises: Promise<any>[] = [];
+
+        if (cashVal > 0) {
+          promises.push(addDoc(collection(db, 'transactions'), {
+            type: formData.type,
+            amount: cashVal,
+            category: formData.category,
+            description: formData.description ? `${formData.description} (ເງິນສົດ Cash)` : 'ລາຍຮັບ (Cash)',
+            source: 'Cash',
+            receiptUrl,
+            date: cleanDate,
+            time: timeStr,
+            updatedAt: serverTimestamp(),
+            userId: auth.currentUser?.uid || 'admin',
+            userEmail: auth.currentUser?.email || 'admin@example.com',
+            branchId: selectedBranch || 'branch_1',
+            createdAt: serverTimestamp()
+          }));
+        }
+
+        if (onepayVal > 0) {
+          promises.push(addDoc(collection(db, 'transactions'), {
+            type: formData.type,
+            amount: onepayVal,
+            category: formData.category,
+            description: formData.description ? `${formData.description} (BCEL OnePay)` : 'ລາຍຮັບ (OnePay)',
+            source: 'Onepay',
+            receiptUrl,
+            date: cleanDate,
+            time: timeStr,
+            updatedAt: serverTimestamp(),
+            userId: auth.currentUser?.uid || 'admin',
+            userEmail: auth.currentUser?.email || 'admin@example.com',
+            branchId: selectedBranch || 'branch_1',
+            createdAt: serverTimestamp()
+          }));
+        }
+
+        if (ldbVal > 0) {
+          promises.push(addDoc(collection(db, 'transactions'), {
+            type: formData.type,
+            amount: ldbVal,
+            category: formData.category,
+            description: formData.description ? `${formData.description} (ທະນາຄານ LDB)` : 'ລາຍຮັບ (LDB)',
+            source: 'LDB',
+            receiptUrl,
+            date: cleanDate,
+            time: timeStr,
+            updatedAt: serverTimestamp(),
+            userId: auth.currentUser?.uid || 'admin',
+            userEmail: auth.currentUser?.email || 'admin@example.com',
+            branchId: selectedBranch || 'branch_1',
+            createdAt: serverTimestamp()
+          }));
+        }
+
+        // Execute all 3 writes simultaneously
+        await Promise.all(promises);
+
+        showToast(i18n.language === 'la' 
+          ? `ບັນທຶກແຍກ 3 ຊ່ອງທາງລວມ ${totalSplit.toLocaleString()} ₭ ສຳເລັດ!` 
+          : `Split transaction saved (${totalSplit.toLocaleString()} ₭)!`, 'success');
+
+        setSplitCashAmount(0);
+        setDisplaySplitCash('');
+        setSplitOnepayAmount(0);
+        setDisplaySplitOnepay('');
+        setSplitLdbAmount(0);
+        setDisplaySplitLdb('');
+      } 
+      // 🌟 2. SINGLE CHANNEL ENTRY
+      else {
+        const txData = {
+          type: formData.type,
+          amount: parseAmount(formData.amount),
+          category: formData.category,
+          description: formData.description,
+          source: formData.source,
+          receiptUrl,
+          date: cleanDate,
+          time: timeStr,
+          updatedAt: serverTimestamp(),
+          userId: auth.currentUser?.uid || 'admin',
+          userEmail: auth.currentUser?.email || 'admin@example.com',
+          branchId: selectedBranch || 'branch_1',
+          ...(isEditing && oldTxData?.supplierPriceIds ? { supplierPriceIds: oldTxData.supplierPriceIds } : {}),
+          ...(isEditing && oldTxData?.supplierName ? { supplierName: oldTxData.supplierName } : {})
+        };
+
+        if (isEditing && editingId) {
+          await setDoc(doc(db, 'transactions', editingId), txData, { merge: true });
+          showToast(i18n.language === 'la' ? 'ແກ້ໄຂລາຍການສຳເລັດ!' : 'Updated successfully!', 'success');
+        } else {
+          await addDoc(collection(db, 'transactions'), {
+            ...txData,
+            createdAt: serverTimestamp()
+          });
+          showToast(i18n.language === 'la' ? `ບັນທຶກລາຍການ (${formData.source}) ສຳເລັດ!` : 'Saved successfully!', 'success');
+        }
       }
 
+      // Instant optimistic reset
       setFormData({
-        type: 'expense',
+        type: 'income',
         amount: 0,
-        category: 'Purchasing',
+        category: 'Sales',
         description: '',
-        source: 'Cash',
+        source: 'Onepay',
         receipt: null,
         receiptPreviewUrl: '',
         date: format(new Date(), 'yyyy-MM-dd'),
@@ -611,7 +781,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       setDeleteReceipt(false);
     } catch (err: any) {
       console.error(err);
-      alert(`Error: ${err.message}`);
+      showToast(`Error: ${err.message}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -626,9 +796,9 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     if (!txToEdit) return;
     const cleanDate = toStandardDateString(txToEdit.date || txToEdit.createdAt) || format(new Date(), 'yyyy-MM-dd');
     setFormData({
-      type: txToEdit.type,
+      type: txToEdit.type || 'income',
       amount: parseAmount(txToEdit.amount),
-      category: txToEdit.category || 'Purchasing',
+      category: txToEdit.category || 'Sales',
       description: txToEdit.description || '',
       source: normalizePaymentChannel(txToEdit.source),
       receipt: null,
@@ -637,6 +807,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       time: txToEdit.time || format(new Date(), 'HH:mm')
     });
     setDisplayAmount(parseAmount(txToEdit.amount).toLocaleString());
+    setChannelMode('single');
     setIsEditing(true);
     setEditingId(txToEdit.id);
     setOldTxData(txToEdit);
@@ -656,11 +827,11 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
     try {
       setLoading(true);
       await deleteDoc(doc(db, 'transactions', txToDelete.id));
-      alert(i18n.language === 'la' ? 'ລຶບລາຍການສຳເລັດ!' : 'Deleted!');
+      showToast(i18n.language === 'la' ? 'ລຶບລາຍການສຳເລັດ!' : 'Deleted successfully!', 'success');
       setShowDeletePinModal(false);
       setTxToDelete(null);
     } catch (err: any) {
-      alert(`Error: ${err.message}`);
+      showToast(`Error: ${err.message}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -682,7 +853,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       });
       setShowBankModal(false);
       setBankAmount(0);
-      alert("Recorded!");
+      showToast("Bank Opening Balance Recorded!", "success");
     } catch (err: any) {
       handleFirestoreError(err, OperationType.WRITE, 'transactions');
     }
@@ -708,8 +879,25 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
       
+      {/* 🌟 In-App Toast Notification */}
+      {toast && (
+        <div className="fixed top-5 right-5 z-[300] max-w-sm w-full animate-in fade-in slide-in-from-top-3 duration-200">
+          <div className={`p-4 rounded-2xl shadow-2xl border flex items-center gap-3 ${
+            toast.type === 'success'
+              ? 'bg-emerald-500 text-white border-emerald-400'
+              : 'bg-rose-500 text-white border-rose-400'
+          }`}>
+            {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertCircle className="w-5 h-5 shrink-0" />}
+            <p className="text-xs font-black tracking-wide flex-1 leading-snug">{toast.message}</p>
+            <button type="button" onClick={() => setToast(null)} className="p-1 hover:bg-white/20 rounded-lg cursor-pointer">
+              <X className="w-4 h-4 text-white" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ================= 1. TOP BAR ================= */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 md:p-5 bg-white dark:bg-[#073069] rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm">
         <div className="flex items-center gap-3">
@@ -763,7 +951,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
         </div>
       </div>
 
-      {/* ================= 2. PAYMENT CHANNELS CARDS ================= */}
+      {/* ================= 2. PAYMENT CHANNELS CARDS (Cash, Onepay, LDB) ================= */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-gradient-to-br from-[#052659] to-[#073069] text-white p-5 rounded-3xl shadow-xl space-y-2 relative overflow-hidden">
           <div className="flex justify-between items-center">
@@ -780,13 +968,14 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
           </p>
         </div>
 
+        {/* Cash Balance */}
         <div className="bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm space-y-2">
           <div className="flex justify-between items-center">
             <span className="text-[10px] font-black uppercase tracking-widest text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
               <Wallet className="w-3.5 h-3.5" />
               <span>{i18n.language === 'la' ? 'ເງິນສົດ (Cash)' : 'Cash Balance'}</span>
             </span>
-            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-emerald-500/10 text-emerald-600 rounded">Cash</span>
+            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-emerald-500/10 text-emerald-600 rounded font-bold">Cash</span>
           </div>
           <p className="text-xl font-black font-mono text-slate-800 dark:text-white">
             {showPrivacy ? '••••••' : `${Math.round(financialSummary.cashNet).toLocaleString()} ₭`}
@@ -797,13 +986,14 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
           </div>
         </div>
 
+        {/* BCEL OnePay */}
         <div className="bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm space-y-2">
           <div className="flex justify-between items-center">
             <span className="text-[10px] font-black uppercase tracking-widest text-red-500 dark:text-red-400 flex items-center gap-1.5">
               <CreditCard className="w-3.5 h-3.5" />
               <span>BCEL OnePay</span>
             </span>
-            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-red-500/10 text-red-500 rounded">OnePay</span>
+            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-red-500/10 text-red-500 rounded font-bold">OnePay</span>
           </div>
           <p className="text-xl font-black font-mono text-slate-800 dark:text-white">
             {showPrivacy ? '••••••' : `${Math.round(financialSummary.onepayNet).toLocaleString()} ₭`}
@@ -814,13 +1004,14 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
           </div>
         </div>
 
+        {/* LDB Bank */}
         <div className="bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-sm space-y-2">
           <div className="flex justify-between items-center">
             <span className="text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
               <Building2 className="w-3.5 h-3.5" />
               <span>{i18n.language === 'la' ? 'ທະນາຄານ LDB' : 'LDB Balance'}</span>
             </span>
-            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-blue-500/10 text-blue-600 rounded">LDB</span>
+            <span className="text-[8.5px] font-mono px-1.5 py-0.5 bg-blue-500/10 text-blue-600 rounded font-bold">LDB</span>
           </div>
           <p className="text-xl font-black font-mono text-slate-800 dark:text-white">
             {showPrivacy ? '••••••' : `${Math.round(financialSummary.ldbNet).toLocaleString()} ₭`}
@@ -925,14 +1116,14 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
       {/* ================= 4. FORM & FEED ROW ================= */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
 
-        {/* LEFT: FORM & SUPPLIER PULL (5 Cols) */}
+        {/* LEFT: FORM (5 Cols) */}
         <div className="xl:col-span-5 space-y-6">
           <div className="high-density-card bg-white dark:bg-[#073069] p-5 sm:p-6 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-xl space-y-4">
             
             <div className="flex justify-between items-center border-b border-slate-100 dark:border-white/10 pb-3">
               <h3 className="text-xs font-black uppercase text-slate-800 dark:text-white flex items-center gap-2">
                 <PlusCircle className="w-4 h-4 text-primary" />
-                <span>{isEditing ? 'ແກ້ໄຂລາຍການ (Edit)' : 'ບັນທຶກລາຍການໃໝ່ (New Transaction)'}</span>
+                <span>{isEditing ? 'ແກ້ໄຂລາຍການ (Edit)' : 'ບັນທຶກລາຍການ (New Entry)'}</span>
               </h3>
               {isEditing && (
                 <button 
@@ -940,17 +1131,18 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                     setIsEditing(false);
                     setEditingId(null);
                     setFormData({
-                      type: 'expense',
+                      type: 'income',
                       amount: 0,
-                      category: 'Purchasing',
+                      category: 'Sales',
                       description: '',
-                      source: 'Cash',
+                      source: 'Onepay',
                       receipt: null,
                       receiptPreviewUrl: '',
                       date: format(new Date(), 'yyyy-MM-dd'),
                       time: format(new Date(), 'HH:mm')
                     });
                     setDisplayAmount('');
+                    setChannelMode('single');
                   }}
                   className="text-[9px] font-black text-red-500 uppercase hover:underline cursor-pointer"
                 >
@@ -960,30 +1152,72 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
             </div>
 
             <form onSubmit={handleAddTransaction} className="space-y-4">
-              <div className="flex bg-slate-100 dark:bg-black/20 p-1 rounded-xl">
+              
+              {/* Type Switcher: Income vs Expense */}
+              <div className="grid grid-cols-2 gap-2 bg-slate-100 dark:bg-black/25 p-1 rounded-2xl border border-slate-200/50 dark:border-white/5">
                 <button 
                   type="button" 
-                  onClick={() => setFormData(prev => ({...prev, type: 'expense'}))}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${formData.type === 'expense' ? 'bg-[#052659] text-white shadow-xs' : 'text-slate-500'}`}
+                  onClick={() => setFormData(prev => ({...prev, type: 'income', category: 'Sales'}))}
+                  className={`py-2 px-3 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    formData.type === 'income' 
+                      ? 'bg-[#052659] text-white shadow-md' 
+                      : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                  }`}
                 >
-                  {t('expense')} (ລາຍຈ່າຍ)
+                  <ArrowUpCircle className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{t('income')} (ລາຍຮັບ)</span>
                 </button>
+
                 <button 
                   type="button" 
-                  onClick={() => setFormData(prev => ({...prev, type: 'income'}))}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${formData.type === 'income' ? 'bg-[#052659] text-white shadow-xs' : 'text-slate-500'}`}
+                  onClick={() => {
+                    setFormData(prev => ({...prev, type: 'expense', category: 'Purchasing'}));
+                    setChannelMode('single');
+                  }}
+                  className={`py-2 px-3 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    formData.type === 'expense' 
+                      ? 'bg-[#052659] text-white shadow-md' 
+                      : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                  }`}
                 >
-                  {t('income')} (ລາຍຮັບ)
+                  <ArrowDownCircle className="w-3.5 h-3.5 text-red-400" />
+                  <span>{t('expense')} (ລາຍຈ່າຍ)</span>
                 </button>
               </div>
 
+              {/* Mode Selector: Single Channel vs Split */}
+              {!isEditing && formData.type === 'income' && (
+                <div className="flex bg-slate-100 dark:bg-black/20 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setChannelMode('single')}
+                    className={`flex-1 py-1.5 text-[10px] font-black uppercase rounded-lg transition-all cursor-pointer ${
+                      channelMode === 'single' ? 'bg-white dark:bg-[#073069] text-slate-800 dark:text-white shadow-xs' : 'text-slate-400'
+                    }`}
+                  >
+                    1. ຊ່ອງທາງດຽວ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setChannelMode('split')}
+                    className={`flex-1 py-1.5 text-[10px] font-black uppercase rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                      channelMode === 'split' ? 'bg-white dark:bg-[#073069] text-blue-500 shadow-xs' : 'text-slate-400'
+                    }`}
+                  >
+                    <Split className="w-3 h-3" />
+                    <span>2. ແຍກ 3 ຊ່ອງທາງ (Cash+OnePay+LDB)</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Date & Time */}
               <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1">
                   <label className="text-[9.5px] font-black uppercase text-slate-400">Date</label>
                   <input 
                     type="date"
                     required
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
+                    className="w-full h-10 px-2.5 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
                     value={formData.date}
                     onChange={e => {
                       const val = toStandardDateString(e.target.value);
@@ -996,62 +1230,170 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                   <input 
                     type="time"
                     required
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white"
+                    className="w-full h-10 px-2.5 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
                     value={formData.time}
                     onChange={e => setFormData(prev => ({...prev, time: e.target.value}))}
                   />
                 </div>
               </div>
 
+              {/* PAYMENT CHANNEL SELECTION (WITH AUTO COMMAS) */}
+              {channelMode === 'split' && !isEditing && formData.type === 'income' ? (
+                <div className="p-4 bg-slate-50 dark:bg-[#041a3c] rounded-2xl border border-slate-200/80 dark:border-white/10 space-y-3">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                    <Split className="w-3.5 h-3.5 text-blue-500" />
+                    <span>ປ້ອນຍອດແຍກຕາມ 3 ຊ່ອງທາງ (ໃສ່ຈຸດອັດຕະໂນມັດ)</span>
+                  </span>
+
+                  {/* Cash Row */}
+                  <div className="p-2.5 bg-white dark:bg-[#073069] rounded-xl border border-slate-200/60 dark:border-white/5 flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-emerald-500" />
+                    <div className="flex-1">
+                      <span className="text-[9px] font-black uppercase text-emerald-600 dark:text-emerald-400 block">Cash (ເງິນສົດ)</span>
+                      <input 
+                        type="text"
+                        placeholder="0"
+                        className="w-full text-xs font-mono font-bold bg-transparent outline-none text-slate-800 dark:text-white"
+                        value={displaySplitCash}
+                        onChange={e => handleSplitAmountChange('cash', e.target.value)}
+                      />
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-400 font-mono">₭</span>
+                  </div>
+
+                  {/* OnePay Row */}
+                  <div className="p-2.5 bg-white dark:bg-[#073069] rounded-xl border border-slate-200/60 dark:border-white/5 flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-red-500" />
+                    <div className="flex-1">
+                      <span className="text-[9px] font-black uppercase text-red-500 dark:text-red-400 block">BCEL OnePay (QR)</span>
+                      <input 
+                        type="text"
+                        placeholder="0"
+                        className="w-full text-xs font-mono font-bold bg-transparent outline-none text-slate-800 dark:text-white"
+                        value={displaySplitOnepay}
+                        onChange={e => handleSplitAmountChange('onepay', e.target.value)}
+                      />
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-400 font-mono">₭</span>
+                  </div>
+
+                  {/* LDB Row */}
+                  <div className="p-2.5 bg-white dark:bg-[#073069] rounded-xl border border-slate-200/60 dark:border-white/5 flex items-center gap-2">
+                    <Building2 className="w-4 h-4 text-blue-500" />
+                    <div className="flex-1">
+                      <span className="text-[9px] font-black uppercase text-blue-600 dark:text-blue-400 block">ທະນາຄານ LDB</span>
+                      <input 
+                        type="text"
+                        placeholder="0"
+                        className="w-full text-xs font-mono font-bold bg-transparent outline-none text-slate-800 dark:text-white"
+                        value={displaySplitLdb}
+                        onChange={e => handleSplitAmountChange('ldb', e.target.value)}
+                      />
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-400 font-mono">₭</span>
+                  </div>
+
+                  {/* Total Sum */}
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex justify-between items-center">
+                    <span className="text-[10px] font-black uppercase text-emerald-700 dark:text-emerald-400">ຍອດລວມທັງໝົດ:</span>
+                    <span className="text-sm font-mono font-black text-emerald-700 dark:text-emerald-400">
+                      {(parseAmount(splitCashAmount) + parseAmount(splitOnepayAmount) + parseAmount(splitLdbAmount)).toLocaleString()} ₭
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400">Amount (₭)</label>
+                    <input 
+                      type="text"
+                      required
+                      placeholder="0"
+                      className="w-full h-11 px-3 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-lg font-mono font-black text-slate-800 dark:text-white"
+                      value={displayAmount}
+                      onChange={handleAmountChange}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[9.5px] font-black uppercase text-slate-400 block">Payment Channel</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFormData(prev => ({ ...prev, source: 'Cash' }))}
+                        className={`p-2.5 rounded-2xl border transition-all flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                          formData.source === 'Cash'
+                            ? 'bg-emerald-500/10 border-emerald-500 text-emerald-600 dark:text-emerald-400 ring-2 ring-emerald-500/20'
+                            : 'bg-slate-50 dark:bg-white/5 border-slate-200/60 dark:border-white/5 text-slate-500 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Wallet className="w-4 h-4" />
+                        <span className="text-[10px] font-black uppercase">Cash</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setFormData(prev => ({ ...prev, source: 'Onepay' }))}
+                        className={`p-2.5 rounded-2xl border transition-all flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                          formData.source === 'Onepay'
+                            ? 'bg-red-500/10 border-red-500 text-red-500 dark:text-red-400 ring-2 ring-red-500/20'
+                            : 'bg-slate-50 dark:bg-white/5 border-slate-200/60 dark:border-white/5 text-slate-500 hover:bg-slate-100'
+                        }`}
+                      >
+                        <CreditCard className="w-4 h-4" />
+                        <span className="text-[10px] font-black uppercase">OnePay</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setFormData(prev => ({ ...prev, source: 'LDB' }))}
+                        className={`p-2.5 rounded-2xl border transition-all flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                          formData.source === 'LDB'
+                            ? 'bg-blue-500/10 border-blue-500 text-blue-600 dark:text-blue-400 ring-2 ring-blue-500/20'
+                            : 'bg-slate-50 dark:bg-white/5 border-slate-200/60 dark:border-white/5 text-slate-500 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Building2 className="w-4 h-4" />
+                        <span className="text-[10px] font-black uppercase">LDB</span>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Category Select */}
               <div className="space-y-1">
-                <label className="text-[9.5px] font-black uppercase text-slate-400">Amount (₭)</label>
-                <input 
-                  type="text"
+                <label className="text-[9.5px] font-black uppercase text-slate-400">Category</label>
+                <select 
+                  className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
+                  value={formData.category}
+                  onChange={e => setFormData(prev => ({...prev, category: e.target.value}))}
                   required
-                  placeholder="0"
-                  className="w-full h-11 px-3 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-lg font-mono font-black text-slate-800 dark:text-white"
-                  value={displayAmount}
-                  onChange={handleAmountChange}
-                />
+                >
+                  {formData.type === 'income' ? (
+                    <>
+                      <option value="Sales">📈 Sales (ຍອດຂາຍ)</option>
+                      <option value="dividends">💵 Dividends (ປັນຜົນ)</option>
+                      <option value="other_income">📦 Other Income (ລາຍຮັບອື່ນໆ)</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="Purchasing">🛒 Purchasing (ວັດຖຸດິບ)</option>
+                      <option value="rent">🏠 Rent (ຄ່າເຊົ່າ)</option>
+                      <option value="salary">👥 Salary (ເງິນເດືອນ)</option>
+                      <option value="operations">⚙️ Operations (ດຳເນີນງານ)</option>
+                      <option value="admin">💼 Admin (ບໍລິຫານ)</option>
+                      <option value="electricity">⚡ Electricity (ຄ່າໄຟ)</option>
+                      <option value="water">💧 Water (ຄ່ານ້ຳ)</option>
+                      <option value="other">📦 Other (ອື່ນໆ)</option>
+                    </>
+                  )}
+                </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">Category</label>
-                  <select 
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
-                    value={formData.category}
-                    onChange={e => setFormData(prev => ({...prev, category: e.target.value}))}
-                    required
-                  >
-                    <option value="Purchasing">🛒 Purchasing (ວັດຖຸດິບ)</option>
-                    <option value="Sales">📈 Sales (ຍອດຂາຍ)</option>
-                    <option value="rent">🏠 Rent (ຄ່າເຊົ່າ)</option>
-                    <option value="salary">👥 Salary (ເງິນເດືອນ)</option>
-                    <option value="operations">⚙️ Operations (ດຳເນີນງານ)</option>
-                    <option value="admin">💼 Admin (ບໍລິຫານ)</option>
-                    <option value="electricity">⚡ Electricity (ຄ່າໄຟ)</option>
-                    <option value="water">💧 Water (ຄ່ານ້ຳ)</option>
-                    <option value="other">📦 Other (ອື່ນໆ)</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[9.5px] font-black uppercase text-slate-400">Payment Channel</label>
-                  <select 
-                    className="w-full h-10 px-2 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-xs font-bold text-slate-800 dark:text-white cursor-pointer"
-                    value={formData.source}
-                    onChange={e => setFormData(prev => ({...prev, source: e.target.value as PaymentChannel}))}
-                  >
-                    <option value="Cash">💵 Cash (ເງິນສົດ)</option>
-                    <option value="Onepay">📱 BCEL OnePay</option>
-                    <option value="LDB">🏦 ທະນາຄານ LDB</option>
-                  </select>
-                </div>
-              </div>
-
+              {/* Description */}
               <div className="space-y-1">
-                <label className="text-[9.5px] font-black uppercase text-slate-400">Description</label>
+                <label className="text-[9.5px] font-black uppercase text-slate-400">Description / Memo</label>
                 <input 
                   type="text"
                   placeholder="Memo..."
@@ -1132,17 +1474,23 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                 )}
               </div>
 
+              {/* Submit Button */}
               <button 
                 type="submit" 
                 disabled={loading}
-                className="w-full h-11 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-white font-black text-xs uppercase rounded-2xl transition-all shadow-lg shadow-emerald-500/20 cursor-pointer"
+                className="w-full h-12 bg-emerald-500 hover:bg-emerald-600 active:scale-[0.99] text-white font-black text-xs uppercase tracking-wider rounded-2xl transition-all shadow-lg shadow-emerald-500/20 cursor-pointer flex items-center justify-center gap-2"
               >
-                {loading ? 'Processing...' : (isEditing ? 'Update Transaction' : 'Save Transaction')}
+                {loading ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                ) : (
+                  <PlusCircle className="w-4 h-4" />
+                )}
+                <span>{loading ? 'Processing...' : (isEditing ? 'Update Transaction' : 'Save Transaction')}</span>
               </button>
             </form>
           </div>
 
-          {/* Supplier Pull Purchases Widget */}
+          {/* Supplier Pull Widget */}
           <div className="high-density-card bg-white dark:bg-[#073069] p-5 rounded-3xl border border-slate-200/80 dark:border-white/10 shadow-xl space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="text-xs font-black uppercase text-slate-800 dark:text-white flex items-center gap-1.5">
@@ -1215,7 +1563,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
           </div>
         </div>
 
-        {/* RIGHT: CHART & LEDGER FEED (7 Cols) */}
+        {/* RIGHT: CHART & LEDGER (7 Cols) */}
         <div className="xl:col-span-7 space-y-6">
 
           {/* 7-Day Chart */}
@@ -1226,16 +1574,11 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                 <span>Weekly Inflows & Outflows</span>
               </h4>
             </div>
-            <div className="p-4 h-[160px]">
-              <ResponsiveContainer width="100%" height="100%">
+            <div className="p-4" style={{ height: 160, minWidth: 100 }}>
+              <ResponsiveContainer width="100%" height={160}>
                 <BarChart data={weeklyData}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.5} />
-                  <XAxis 
-                    dataKey="displayDate" 
-                    tick={{fontSize: 9}} 
-                    axisLine={false} 
-                    tickLine={false} 
-                  />
+                  <XAxis dataKey="displayDate" tick={{fontSize: 9}} axisLine={false} tickLine={false} />
                   <YAxis hide />
                   <Tooltip 
                     contentStyle={{ backgroundColor: '#052659', borderRadius: '12px', fontSize: '11px', color: '#fff' }}
@@ -1248,11 +1591,10 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
             </div>
           </div>
 
-          {/* Live Transaction Ledger Table with Plain Text Quick Buttons (No icons) */}
+          {/* Ledger Table */}
           <div className="high-density-card p-0 flex flex-col min-h-[500px] overflow-hidden bg-white dark:bg-[#073069] border border-slate-200/80 dark:border-white/10 shadow-xl rounded-3xl">
             
-            <div className="p-4 border-b border-slate-100 dark:border-white/10 flex flex-col gap-3">
-              
+            <div className="p-4 border-b border-slate-100 dark:border-white/5 flex flex-col gap-3">
               <div className="flex flex-wrap justify-between items-center gap-2">
                 <div className="flex items-center gap-2">
                   <input 
@@ -1272,18 +1614,16 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                   </span>
                 </div>
 
-                <div className="flex gap-2">
-                  <button 
-                    onClick={handleExport}
-                    className="px-3 py-1 bg-slate-100 dark:bg-white/10 rounded-xl text-[10px] font-black uppercase text-blue-500 flex items-center gap-1 cursor-pointer"
-                  >
-                    <Download className="w-3 h-3" />
-                    Excel
-                  </button>
-                </div>
+                <button 
+                  onClick={handleExport}
+                  className="px-3 py-1 bg-slate-100 dark:bg-white/10 rounded-xl text-[10px] font-black uppercase text-blue-500 flex items-center gap-1 cursor-pointer"
+                >
+                  <Download className="w-3 h-3" />
+                  Excel
+                </button>
               </div>
 
-              {/* Plain Text Navigation Buttons (NO EMOJIS / NO ICONS) */}
+              {/* Navigation Shortcuts */}
               <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-100 dark:border-white/5 text-[9.5px]">
                 <button
                   type="button"
@@ -1299,11 +1639,9 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                 <button
                   type="button"
                   onClick={() => {
-                    // Safe 1st day of active month string (No Date Object Bug)
                     const activeDateStr = toStandardDateString(viewDate) || format(new Date(), 'yyyy-MM-dd');
                     const [y, m] = activeDateStr.split('-');
-                    const firstDay = `${y}-${m}-01`;
-                    setViewDate(firstDay);
+                    setViewDate(`${y}-${m}-01`);
                     setShowAllMonthRecords(false);
                   }}
                   className="px-3 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-300 rounded-lg font-bold cursor-pointer transition-all"
@@ -1314,8 +1652,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                 <button
                   type="button"
                   onClick={() => {
-                    const yest = format(subDays(new Date(), 1), 'yyyy-MM-dd');
-                    setViewDate(yest);
+                    setViewDate(format(subDays(new Date(), 1), 'yyyy-MM-dd'));
                     setShowAllMonthRecords(false);
                   }}
                   className="px-3 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-300 rounded-lg font-bold cursor-pointer transition-all"
@@ -1337,11 +1674,11 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                     : (i18n.language === 'la' ? 'ເບິ່ງທັງໝົດໃນເດືອນນີ້' : 'View Entire Month')}
                 </button>
               </div>
-
             </div>
 
             <div className="flex-1 overflow-x-auto divide-y divide-slate-100 dark:divide-white/5">
               {dailyTransactions.map(tx => {
+                if (!tx) return null;
                 const ch = normalizePaymentChannel(tx.source);
                 const isInc = tx.type === 'income';
 
@@ -1405,7 +1742,7 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
 
       </div>
 
-      {/* ================= RECEIPT VIEWER POPUP MODAL ================= */}
+      {/* RECEIPT VIEWER POPUP MODAL */}
       {previewReceiptModalUrl && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
           <div className="bg-white dark:bg-[#073069] w-full max-w-2xl rounded-3xl p-6 shadow-2xl border border-white/10 flex flex-col space-y-4 max-h-[90vh]">
@@ -1414,26 +1751,27 @@ export default function Financials({ appConfig, selectedBranch }: { appConfig: a
                 <ImageIcon className="w-4 h-4 text-emerald-500" />
                 <span>Attached Receipt Document</span>
               </h4>
-              <button 
-                type="button" 
-                onClick={() => setPreviewReceiptModalUrl(null)}
-                className="p-1 hover:bg-slate-100 dark:hover:bg-white/10 rounded-xl cursor-pointer"
-              >
+              <button type="button" onClick={() => setPreviewReceiptModalUrl(null)} className="p-1 hover:bg-slate-100 dark:hover:bg-white/10 rounded-xl cursor-pointer">
                 <X className="w-5 h-5 text-slate-400" />
               </button>
             </div>
 
             <div className="flex-1 overflow-auto rounded-2xl bg-black/5 flex items-center justify-center p-2">
-              <img 
-                src={previewReceiptModalUrl} 
-                alt="Receipt Full View" 
-                className="max-h-[70vh] w-auto object-contain rounded-xl shadow-md"
-              />
+              <img src={previewReceiptModalUrl} alt="Receipt Full View" className="max-h-[70vh] w-auto object-contain rounded-xl shadow-md" />
             </div>
           </div>
         </div>
       )}
 
     </div>
+  );
+}
+
+// 🛡️ Wrapper with Error Boundary
+export default function Financials(props: { appConfig: any, selectedBranch?: string }) {
+  return (
+    <FinancialsErrorBoundary>
+      <FinancialsContent {...props} />
+    </FinancialsErrorBoundary>
   );
 }
