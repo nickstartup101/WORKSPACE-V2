@@ -28,6 +28,8 @@ const SUPPLIER_CODES: Record<string, string> = {
   'HEAVENLY': 'HV',
   'DMART': 'DM',
   'MARRY ANN': 'MA',
+  'LATERRAS': 'LT',
+  'LUCKKHANA': 'LK',
   'OTHER': 'OT'
 };
 
